@@ -16,7 +16,7 @@ from AgentDropout.llm.llm_registry import LLMRegistry
 
 load_dotenv()
 MINE_BASE_URL = "https://api.deepseek.com/v1"
-MINE_API_KEYS = "sk-49b745d77b9d453eb7f92e037876ae95"
+MINE_API_KEYS = "yours"
 #sk-be6ece98fbc84792a1a188c0d487a7ee
 # print(MINE_BASE_URL)
 
@@ -69,7 +69,7 @@ async def achat(model: str, msg: List[Dict],):
 async def achat_deepseek(model: str, msg: List[Dict],):
     model = 'deepseek-chat'
     # print(1111111)
-    api_kwargs = dict(api_key ="sk-49b745d77b9d453eb7f92e037876ae95", base_url ="https://api.deepseek.com/v1")
+    api_kwargs = dict(api_key ="yours", base_url ="https://api.deepseek.com/v1")
     aclient = AsyncOpenAI(**api_kwargs)
     try:
         async with async_timeout.timeout(5000):
