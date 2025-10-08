@@ -1,2 +1,2 @@
-# ABO
-code  for Agent Bayesian-Out
+# BEAM
+code  for BEAM
