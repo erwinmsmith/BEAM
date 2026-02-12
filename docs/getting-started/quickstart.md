@@ -125,7 +125,7 @@ Your solution:"""
 
 ---
 
-## Step 4: Use Prompt Templates (Recommended)
+## Step 4: Use Prompt Templates 
 
 ```python
 from beam import PromptSet, PromptRegistry
