@@ -1,0 +1,66 @@
+# 项目基本信息
+site_name: BEAM Documentation
+site_description: Token-efficient multi-agent inference framework
+site_author: erwinmsmith
+site_url: https://erwinmsmith.github.io/My_BEAM/
+repo_url: https://github.com/erwinmsmith/My_BEAM
+edit_uri: edit/main/docs/
+
+# 主题配置 (使用 THETA 同款 Material 主题)
+theme:
+  name: material
+  language: zh  # 设置为中文界面
+  palette:
+    # 浅色模式
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: 切换至深色模式
+    # 深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: 切换至浅色模式
+  features:
+    - navigation.tabs      # 开启顶部大栏目导航
+    - navigation.sections  # 侧边栏分组显示
+    - navigation.expand    # 默认展开侧边栏
+    - navigation.top       # 回到顶部按钮
+    - search.suggest       # 搜索建议
+    - search.highlight     # 搜索高亮
+    - content.code.copy    # 代码块一键复制按钮
+
+# 导航栏配置 
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Overview: getting-started/overview.md
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+  - Models:
+      - Strategies: models/strategies.md
+  - API Reference: api-reference/apireference.md
+  - Examples: examples/examples.md
+
+# 扩展插件配置
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition  # 开启警告、提示框
+  - def_list
+  - tables      # 开启表格支持
