@@ -73,32 +73,6 @@ pip install -e ".[dev]"
 
 ---
 
-## Verify Installation
-
-Check that PyTorch and CUDA are properly installed:
-
-```bash
-python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
-python -c "import torch; print(f'CUDA version: {torch.version.cuda}')"
-```
-
-Expected output:
-
-```
-PyTorch version: 2.0.1+cu118
-CUDA available: True
-CUDA version: 11.8
-```
-
-Check THETA installation:
-
-```bash
-python -c "from beam import BEAMConfig, AgentConfig, OptimizationConfig; print('BEAM installed successfully')"
-```
-
----
-
 ## Next Steps
 
 - [Quick Start Tutorial](quickstart.md) - Train your first model in 5 minutes

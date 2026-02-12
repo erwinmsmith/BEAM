@@ -224,15 +224,6 @@ print(f"Tokens used: {metadata['tokens_used']}")
 print(f"Agents activated: {metadata['active_agents']}")
 ```
 
-**View visualizations:**
-
-Open the visualization files in your browser or image viewer:
-
-- `topic_words_bars.png`: Bar charts showing top words for each topic
-- `topic_similarity.png`: Heatmap of topic similarities
-- `doc_topic_umap.png`: UMAP projection of documents in topic space
-- `pyldavis.html`: Interactive visualization (open in browser)
-
 ---
 
 ## What's Next?
