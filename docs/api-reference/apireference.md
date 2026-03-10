@@ -4,6 +4,28 @@ The BEAM API Reference provides a detailed technical overview of the framework's
 
 ---
 
+## LLMConfig
+
+```python
+from beam import BEAMConfig, LLMRegistry
+
+llm = LLMRegistry.get(
+    model_name="gpt-4o",       # Model identifier
+    api_key="sk-xxxx",          # Provider API key
+    base_url=None,              # Custom API endpoint (Optional)
+    temperature=0.2,            # Generation randomness (0.0-1.0)
+    max_tokens=1000             # Max output length per request
+)
+
+config = BEAMConfig(
+    llm=llm,                    # Inject LLM instance
+    max_rounds=5,               # Max iteration rounds for the task
+    # ... additional settings (pruning, optimization, etc.)
+)
+```
+
+---
+
 ## Core Classes
 
 **BEAMConfig:**
@@ -80,10 +102,18 @@ results = await graph.run({"task": "..."}, num_rounds=2)
 
 | Method | Arguments | Returns | Description |
 | :--- | :--- | :--- | :--- |
-| **`add_node(node)`** | `node: AgentNode` | `None` | Adds a single agent node to the graph. |
-| **`add_nodes(nodes)`** | `nodes: List[Node]` | `None` | Batch adds multiple agent nodes. |
-| **`run(inputs, rounds)`** | `dict, int` | `List[Res]` | Asynchronously executes the reasoning flow. |
+| **`add_node(node)`** | `node: AgentNode` | `AgentNode` | Adds a single agent node to the graph and assigns a unique ID. |
+| **`add_nodes(nodes)`** | `nodes: List[AgentNode]` | `None` | Batch adds multiple agent nodes to the network. |
+| **`run(inputs, rounds)`** | `dict, int` | `Tuple[List, Tensor]` | **Synchronous execution**. Runs the reasoning flow and returns final answers along with the joint log probabilities (`log_probs`) for optimization. |
+| **`arun(inputs, rounds)`** | `dict, int` | `Tuple[List, Tensor]` | **Asynchronous execution**. Uses topological sorting to schedule agents, allowing independent nodes to run in parallel. |
+| **`update_masks(rate)`** | `rate: float` | `Tuple[Tensor, Tensor]` | **Structural Pruning**. Permanently disables the lowest-weighted connections based on the specified pruning rate. |
+| **`get_trainable_parameters()`** | `None` | `List[Parameter]` | **Optimizer Interface**. Returns all learnable connection weights (logits) for gradient-based updates via PyTorch. |
+| **`num_edges` (Property)** | `None` | `int` | **Complexity Metric**. Returns the total count of currently active connections in the graph. |
+| **`spatial_adj_matrix` (Property)** | `None` | `np.ndarray` | **Adjacency Matrix**. Exports the $N \times N$ spatial connectivity matrix for graph visualization and analysis. |
+| **`construct_spatial_connections()`** | `temp, thresh` | `Tensor` | **Dynamic Sampling**. Instantiates actual edges between agents for the current run based on probability logits and temperature. |
+| **`check_cycle(node, targets)`** | `Node, set` | `bool` | **Integrity Check**. Validates that adding an edge does not create a cycle, ensuring the graph remains a Directed Acyclic Graph (DAG). |
 
+---
 **PromptSet:**
 
 Collection of prompts for a domain.
@@ -211,6 +241,7 @@ wrapped = wrap_langchain_runnable(your_chain, beam_config)
 **LangGraph:**
 
 Registry for LLM implementations.
+
 ```python
 from beam.integrations.langgraph import (
     BEAMState,

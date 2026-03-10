@@ -26,16 +26,7 @@ BEAM requires the following system specifications:
 
 ## Installation Steps
 
-### Step 1: Clone the Repository
-
-```bash
-
-git clone https://github.com/erwinmsmith/BEAM.git
-cd BEAM
-pip install -e .
-```
-
-### Step 2: Create Virtual Environment
+### Step 1: Create Virtual Environment
 
 Using conda (recommended):
 
@@ -50,6 +41,15 @@ Using venv:
 python -m venv beam-env
 source beam-env/bin/activate  # On Linux/macOS
 # beam-env\Scripts\activate   # On Windows
+```
+
+### Step 2: Clone the Repository
+
+```bash
+
+git clone https://github.com/erwinmsmith/BEAM.git
+cd BEAM
+pip install -e .
 ```
 
 ### Step 3: Install Dependencies
@@ -69,6 +69,13 @@ pip install -e ".[all]"
 
 # Development tools
 pip install -e ".[dev]"
+```
+
+### Step 4: Verify Successful Installation
+
+```python
+import beam
+print(beam.__version__)
 ```
 
 ---

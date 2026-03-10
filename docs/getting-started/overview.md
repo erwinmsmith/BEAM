@@ -7,7 +7,7 @@ Understanding BEAM's architecture and workflow will help you use it effectively.
 ## Architecture Overview
 
 BEAM is a framework designed to optimize communication efficiency in multi-agent LLM systems while maintaining output quality under incomplete information. It addresses the challenge of high inference costs in multi-agent architectures by learning which agent connections and communications are essential using Bayesian optimization techniques.
-THETA consists of three main components:
+BEAM consists of three main components:
 
 **How It Works:**
 

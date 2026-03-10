@@ -210,7 +210,7 @@ def eval_fn(prediction: str, answer: str) -> float:
 training_stats = strategy.train(
     train_data=train_data,
     eval_fn=eval_fn,
-    epochs=10,
+    enum_iterations=10,
     batch_size=4
 )
 
