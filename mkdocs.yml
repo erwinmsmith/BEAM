@@ -46,6 +46,7 @@ nav:
       - Configuration: getting-started/config.md
   - Models:
       - Strategies: models/strategies.md
+      - BEAM Probability Model: models/beam-theory.md
       - LangChain: models/LangChain.md
       - LangGraph: models/LangGraph.md
   - API Reference: api-reference/apireference.md

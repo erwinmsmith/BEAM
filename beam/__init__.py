@@ -1,5 +1,5 @@
 """
-BEAM: Budget-Efficient Agent Management
+BEAM: Bayesian Energy-Aware Multi-Agent Communication
 A toolkit for token-efficient multi-agent inference optimization.
 
 Supports three optimization strategies:
@@ -17,10 +17,11 @@ from beam.core.optimizer import TokenOptimizer
 from beam.core.graph import AgentGraph
 from beam.core.node import AgentNode, create_agent_node
 from beam.core.llm import BaseLLM, LLMRegistry
+from beam.core.probability import GraphState
 from beam.strategies import AgentPrune, AgentDropout, AgentBayesian
 from beam.prompts import PromptRegistry, PromptTemplate, PromptSet
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     # Config
     "BEAMConfig",
@@ -29,6 +30,7 @@ __all__ = [
     # Core
     "TokenOptimizer",
     "AgentGraph",
+    "GraphState",
     "AgentNode",
     "create_agent_node",
     "BaseLLM",

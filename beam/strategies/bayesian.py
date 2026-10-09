@@ -1,513 +1,462 @@
-"""AgentBayesian strategy - Bayesian optimization with optional MCMC sampling."""
+"""BEAM: joint node/edge calibration and uncertainty-aware DAG deployment."""
 
-from typing import Dict, Any, List, Optional, Tuple
-import torch
 import asyncio
-import copy
-import numpy as np
+from dataclasses import asdict
+import math
+from typing import Any, Dict, List, Optional
 
+import torch
+
+from beam.core.config import BEAMConfig, OptimizationConfig
 from beam.core.graph import AgentGraph
-from beam.core.config import BEAMConfig
-
-try:
-    from sklearn.gaussian_process import GaussianProcessRegressor
-    from sklearn.gaussian_process.kernels import RBF, WhiteKernel
-    HAS_SKLEARN = True
-except ImportError:
-    HAS_SKLEARN = False
-
-try:
-    import pyro
-    from pyro.infer import MCMC, NUTS
-    from pyro.distributions import Normal, Bernoulli
-    HAS_PYRO = True
-except ImportError:
-    HAS_PYRO = False
+from beam.core.probability import (
+    CoordinateSampler,
+    GraphState,
+    SparsePairGP,
+    conditioned_samples,
+    covariance_loss,
+    deployment_state,
+    interior_cdf,
+    pairs,
+    validate_unit,
+)
 
 
 class AgentBayesian:
-    """
-    AgentBayesian optimization strategy.
-    
-    This strategy uses Bayesian optimization to learn edge importance,
-    with optional MCMC sampling for more robust uncertainty estimation.
-    
-    Features:
-    - Gaussian Process regression for edge weight estimation
-    - Optional MCMC sampling using NUTS for better exploration
-    - Uncertainty-aware edge pruning
-    
-    Example:
-        ```python
-        config = BEAMConfig(
-            agents=[AgentConfig(name="MathSolver", count=4)],
-            optimization=OptimizationConfig(
-                strategy=OptimizationStrategy.BAYESIAN,
-                use_bayesian=True,
-                use_mcmc=True,
-                mcmc_samples=50
-            )
-        )
-        
-        bayesian = AgentBayesian(config)
-        bayesian.set_graph(graph)
-        
-        # Train with Bayesian optimization
-        bayesian.train(train_data, eval_fn)
-        
-        # Inference
-        result = await bayesian.run({"task": "..."})
-        ```
+    """Fit the KL-regularized graph objective and deploy repaired graph samples.
+
+    Calibration fixes the structural reference and caches task utility for each
+    state within a batch. GP and energy updates occur between calibration batches.
+    ``sample_reference`` exposes the fixed-target chain from Algorithm 1;
+    ``run`` uses the independent draws and consensus from Algorithm 2.
     """
 
     def __init__(self, config: BEAMConfig):
         self.config = config
         self.graph: Optional[AgentGraph] = None
-        self.optimizer: Optional[torch.optim.Optimizer] = None
         self.training_history: List[Dict[str, Any]] = []
-        
-        # Bayesian-specific parameters
-        self.use_mcmc = config.optimization.use_mcmc
-        self.mcmc_samples = config.optimization.mcmc_samples
-        self.mcmc_warmup = config.optimization.mcmc_warmup
-        
-        # Gaussian Process for edge weight estimation
-        self.gp: Optional[GaussianProcessRegressor] = None
-        
-        # Edge statistics
-        self.edge_means: Optional[torch.Tensor] = None
-        self.edge_vars: Optional[torch.Tensor] = None
-        self.temporal_edge_means: Optional[torch.Tensor] = None
-        self.temporal_edge_vars: Optional[torch.Tensor] = None
-        
-        # Observation history for GP
         self.observation_history: List[Dict[str, Any]] = []
+        self.optimizer = None
+        self.gp = None
+        self.edge_means = self.edge_vars = None
+        self._validate_config()
+        self.generator = torch.Generator()
+        if config.optimization.random_seed is None:
+            self.generator.seed()
+        else:
+            self.generator.manual_seed(config.optimization.random_seed)
+
+    def _validate_config(self):
+        c = self.config.optimization
+        positive = [
+            "beta",
+            "energy_min",
+            "energy_max",
+            "energy_dt",
+            "baseline_std",
+            "coupling_epsilon",
+            "node_std",
+            "gp_length_scale",
+            "gp_scale",
+            "gp_observation_variance",
+            "gp_jitter",
+            "learning_rate",
+        ]
+        nonnegative = [
+            "communication_cost_weight",
+            "energy_gain",
+            "energy_cost",
+            "uncertainty_scale",
+            "node_energy_weight",
+        ]
+        for name in positive + nonnegative:
+            value = getattr(c, name)
+            if not math.isfinite(value) or value < 0 or (name in positive and value == 0):
+                raise ValueError(f"Invalid {name}")
+        if not c.energy_min < c.energy_max or not c.energy_min <= c.energy_initial <= c.energy_max:
+            raise ValueError(
+                "Require 0 < energy_min <= energy_initial <= energy_max, with distinct bounds"
+            )
+        for name in [
+            "mcmc_samples",
+            "deployment_samples",
+            "gp_inducing_points",
+            "batch_size",
+            "num_iterations",
+        ]:
+            if not isinstance(getattr(c, name), int) or getattr(c, name) < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if c.mcmc_samples < 2 or not isinstance(c.mcmc_warmup, int) or c.mcmc_warmup < 0:
+            raise ValueError("Require mcmc_samples >= 2 and mcmc_warmup >= 0")
+        if not 0 <= c.consensus_threshold <= 1 or not math.isfinite(c.edge_threshold):
+            raise ValueError("Invalid graph threshold")
+        if c.node_threshold is not None and not math.isfinite(c.node_threshold):
+            raise ValueError("Node threshold must be finite")
 
     def set_graph(self, graph: AgentGraph):
-        """Set the agent graph to optimize."""
-        self.graph = graph
-        n = len(graph.agent_names)
-        num_edges = n * n
-        
-        # Initialize edge statistics
-        self.edge_means = torch.zeros(num_edges)
-        self.edge_vars = torch.ones(num_edges)
-        self.temporal_edge_means = torch.zeros(num_edges)
-        self.temporal_edge_vars = torch.ones(num_edges)
-        
-        # Initialize Gaussian Process
-        if HAS_SKLEARN:
-            kernel = RBF() + WhiteKernel()
-            self.gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-5)
-        
-        self._setup_optimizer()
+        n = len(graph.nodes)
+        if n < 2 or n != len(graph.agent_names):
+            raise ValueError("Register all configured agents (at least two) before set_graph")
+        self.graph, self.n = graph, n
+        self.training_history = []
+        self.observation_history = []
+        self.pairs = pairs(n)
+        self.features = torch.tensor(self.pairs, dtype=torch.float64) / (n - 1)
+        c = self.config.optimization
+        self.gp = SparsePairGP(
+            self.features,
+            c.gp_inducing_points,
+            c.gp_length_scale,
+            c.gp_scale,
+            c.gp_observation_variance,
+            c.gp_jitter,
+        )
+        self.energy = torch.full((n,), c.energy_initial, dtype=torch.float64)
+        self.completeness = torch.ones(n, dtype=torch.float64)
+        self.offsets = torch.nn.Parameter(torch.zeros(n * n, dtype=torch.float64))
+        self.optimizer = torch.optim.Adam([self.offsets], lr=c.learning_rate)
+        self._refresh_scores()
 
-    def _setup_optimizer(self):
-        """Setup PyTorch optimizer."""
+    def _require_graph(self):
         if self.graph is None:
-            return
-        
-        params = self.graph.get_trainable_parameters()
-        if params:
-            self.optimizer = torch.optim.Adam(
-                params,
-                lr=self.config.optimization.learning_rate
+            raise ValueError("Call set_graph with registered agents first")
+
+    def set_completeness(self, completeness):
+        """Set the retained information fraction for each agent in the next round."""
+        self._require_graph()
+        values = validate_unit(completeness, "Completeness")
+        if values.shape != (self.n,):
+            raise ValueError("One completeness coefficient is required per agent")
+        self.completeness = values.clone()
+        self._refresh_scores()
+
+    def update_energy(self, contributions, costs):
+        """Apply the clipped energy transition (Eq. 3), between fixed-target runs."""
+        self._require_graph()
+        contribution = validate_unit(contributions, "Contributions")
+        cost = validate_unit(costs, "Costs")
+        if contribution.shape != (self.n,) or cost.shape != (self.n,):
+            raise ValueError("Contribution and cost vectors must match the agents")
+        c = self.config.optimization
+        drift = c.energy_gain * contribution - c.energy_cost * cost
+        noise = torch.randn(self.n, dtype=torch.float64, generator=self.generator)
+        updated = (
+            self.energy
+            + drift * c.energy_dt
+            + (
+                c.uncertainty_scale
+                * (1 - self.completeness)
+                * torch.sqrt(self.energy * c.energy_dt)
+                * noise
             )
+        )
+        self.energy = updated.clamp(c.energy_min, c.energy_max)
+        self._refresh_scores()
 
-    def _update_edge_statistics(self, observations: List[Dict[str, Any]]):
-        """Update edge mean and variance estimates using observations."""
-        if not observations or self.edge_means is None:
-            return
-        
-        # Collect edge activations and rewards
-        edge_rewards = {}
-        
-        for obs in observations:
-            edges = obs.get("active_edges", [])
-            reward = obs.get("reward", 0.0)
-            
-            for edge_idx in edges:
-                if edge_idx not in edge_rewards:
-                    edge_rewards[edge_idx] = []
-                edge_rewards[edge_idx].append(reward)
-        
-        # Update means and variances
-        for edge_idx, rewards in edge_rewards.items():
-            if edge_idx < len(self.edge_means):
-                # Bayesian update
-                prior_mean = self.edge_means[edge_idx].item()
-                prior_var = self.edge_vars[edge_idx].item()
-                
-                obs_mean = np.mean(rewards)
-                obs_var = np.var(rewards) + 1e-6
-                n_obs = len(rewards)
-                
-                # Posterior update
-                posterior_var = 1.0 / (1.0 / prior_var + n_obs / obs_var)
-                posterior_mean = posterior_var * (prior_mean / prior_var + n_obs * obs_mean / obs_var)
-                
-                self.edge_means[edge_idx] = posterior_mean
-                self.edge_vars[edge_idx] = posterior_var
-
-    def _mcmc_sample_edges(
-        self,
-        round_idx: int,
-        temperature: float = 1.0
-    ) -> Tuple[List[int], torch.Tensor]:
-        """
-        Sample edge connections using MCMC.
-        
-        Returns:
-            Tuple of (active_edge_indices, log_probability)
-        """
-        if not HAS_PYRO or self.graph is None:
-            return [], torch.tensor(0.0)
-        
-        n = len(self.graph.agent_names)
-        num_edges = n * n
-        
-        # Define Bayesian model
-        def model():
-            edge_means = pyro.sample(
-                "edge_means",
-                Normal(
-                    torch.zeros(num_edges),
-                    torch.ones(num_edges)
-                )
+    def _refresh_scores(self):
+        c = self.config.optimization
+        mean, variance = self.gp.moments()
+        e = self.energy
+        normalizer = c.energy_max**2 / math.sqrt(2 * c.energy_max**2 + c.coupling_epsilon)
+        coupling = (
+            e[:, None]
+            * e[None, :]
+            / (normalizer * torch.sqrt(e[:, None] ** 2 + e[None, :] ** 2 + c.coupling_epsilon))
+        )
+        self.edge_means = coupling.clone()
+        self.edge_vars = torch.zeros_like(coupling)
+        for k, (i, j) in enumerate(self.pairs):
+            self.edge_means[i, j] += mean[k]
+            self.edge_vars[i, j] = (
+                variance[k]
+                + c.baseline_std**2
+                + c.uncertainty_scale**2
+                * ((1 - self.completeness[i]) ** 2 + (1 - self.completeness[j]) ** 2)
             )
-            
-            active_edges = []
-            for i in range(num_edges):
-                prob = torch.sigmoid(edge_means[i] / temperature)
-                is_active = pyro.sample(
-                    f"edge_{i}",
-                    Bernoulli(prob)
-                )
-                if is_active:
-                    active_edges.append(i)
-            
-            return edge_means, active_edges
-        
-        # Run MCMC
-        nuts_kernel = NUTS(model, step_size=0.01)
-        mcmc = MCMC(nuts_kernel, num_samples=self.mcmc_samples, warmup_steps=self.mcmc_warmup)
-        mcmc.run()
-        
-        # Get samples
-        samples = mcmc.get_samples()
-        edge_means_samples = samples["edge_means"]
-        
-        # Use mean of samples
-        mean_edge_means = edge_means_samples.mean(dim=0)
-        
-        # Determine active edges
-        active_edges = []
-        log_prob = torch.tensor(0.0)
-        
-        for i in range(num_edges):
-            prob = torch.sigmoid(mean_edge_means[i] / temperature)
-            if torch.rand(1) < prob:
-                active_edges.append(i)
-                log_prob = log_prob + torch.log(prob)
-            else:
-                log_prob = log_prob + torch.log(1 - prob)
-        
-        return active_edges, log_prob
+        p = torch.zeros_like(coupling)
+        rows, cols = zip(*self.pairs)
+        p[rows, cols] = interior_cdf(
+            self.edge_means[rows, cols], self.edge_vars[rows, cols], c.edge_threshold
+        )
+        node_mean = p.sum(0) + p.sum(1) + c.node_energy_weight * e
+        threshold = self.n - 1 if c.node_threshold is None else c.node_threshold
+        r = interior_cdf(node_mean, torch.full_like(e, c.node_std**2), threshold)
+        self.prior_logits = torch.logit(torch.cat((r, p[rows, cols]))).detach()
 
-    def _gp_sample_edges(
-        self,
-        temperature: float = 1.0
-    ) -> Tuple[List[int], torch.Tensor]:
-        """
-        Sample edge connections using Gaussian Process.
-        
-        Returns:
-            Tuple of (active_edge_indices, log_probability)
-        """
-        if self.edge_means is None or self.edge_vars is None:
-            return [], torch.tensor(0.0)
-        
-        active_edges = []
-        log_prob = torch.tensor(0.0)
-        
-        for i in range(len(self.edge_means)):
-            # Sample from posterior
-            mean = self.edge_means[i]
-            std = torch.sqrt(self.edge_vars[i])
-            
-            # UCB-style exploration
-            sampled_value = mean + 0.5 * std * torch.randn(1).item()
-            prob = torch.sigmoid(torch.tensor(sampled_value / temperature))
-            
-            if torch.rand(1) < prob:
-                active_edges.append(i)
-                log_prob = log_prob + torch.log(prob)
-            else:
-                log_prob = log_prob + torch.log(1 - prob)
-        
-        return active_edges, log_prob
+    def probabilities(self, fitted=True):
+        """Node and off-diagonal edge probabilities, in agent insertion order."""
+        self._require_graph()
+        logits = self.prior_logits + self.offsets.detach() if fitted else self.prior_logits
+        eps = torch.finfo(logits.dtype).eps
+        probabilities = logits.sigmoid().clamp(eps, 1 - eps)
+        edges = torch.zeros((self.n, self.n), dtype=torch.float64)
+        rows, cols = zip(*self.pairs)
+        edges[rows, cols] = probabilities[self.n :]
+        return probabilities[: self.n], edges
 
-    def train(
-        self,
-        train_data: List[Dict[str, Any]],
-        eval_fn,
-        num_iterations: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        verbose: bool = True
-    ) -> Dict[str, Any]:
+    async def sample_reference(self, utility, initial=None, transitions=None, burn_in=None):
+        """Sample pi_beta proportional to p0 exp(beta*u), caching u per state.
+
+        ``utility(state)`` is a deterministic [0,1] callback (sync or async).
+        ``transitions`` counts all transitions; ``burn_in`` counts discarded ones.
+        All structural logits are copied when the chain starts.
         """
-        Train the Bayesian strategy.
-        
-        Args:
-            train_data: Training examples with 'task' and 'answer'
-            eval_fn: Evaluation function (prediction, answer) -> utility
-            num_iterations: Training iterations
-            batch_size: Batch size
-            verbose: Print progress
-            
-        Returns:
-            Training statistics
-        """
-        if self.graph is None:
-            raise ValueError("Graph must be set before training")
-        
-        num_iterations = num_iterations or self.config.optimization.num_iterations
-        batch_size = batch_size or self.config.optimization.batch_size
-        
+        self._require_graph()
+        c = self.config.optimization
+        burn_in = c.mcmc_warmup if burn_in is None else burn_in
+        transitions = burn_in + c.mcmc_samples if transitions is None else transitions
+        sampler = CoordinateSampler(self.prior_logits, self.n, utility, c.beta, self.generator)
+        return await sampler.sample(transitions, burn_in, initial)
+
+    async def _variational_samples(self):
+        c = self.config.optimization
+        if c.use_mcmc:
+            sampler = CoordinateSampler(
+                self.prior_logits + self.offsets.detach(), self.n, generator=self.generator
+            )
+            return await sampler.sample(c.mcmc_warmup + c.mcmc_samples, c.mcmc_warmup)
+        nodes, edges = self.probabilities()
+        return conditioned_samples(nodes, edges, c.mcmc_samples, self.generator)
+
+    async def _train_batch(self, batch, eval_fn):
+        self._require_graph()
+        if not batch:
+            raise ValueError("Calibration batches must be nonempty")
+        c = self.config.optimization
+        prior = self.prior_logits.clone()
+        states = await self._variational_samples()
+        utilities, accuracies = {}, {}
+        observations = []
+        for state in dict.fromkeys(states):
+            scores = []
+            for record in batch:
+                if any(state.nodes):
+                    answers, _ = await self.graph.arun_state(
+                        {"task": record["task"]}, state, self.config.num_rounds
+                    )
+                    score = float(eval_fn(answers[0] if answers else "", record["answer"]))
+                    validate_unit(score, "Calibration score")
+                else:
+                    score = 0.0
+                scores.append(score)
+            accuracy = sum(scores) / len(scores)
+            cost = sum(sum(row) for row in state.edges) / len(self.pairs)
+            utilities[state] = (
+                accuracy - c.communication_cost_weight * cost + c.communication_cost_weight
+            ) / (1 + c.communication_cost_weight)
+            accuracies[state] = accuracy
+            observations.append(
+                {
+                    "nodes": list(state.nodes),
+                    "active_edges": [i * self.n + j for i, j in self.pairs if state.edges[i][j]],
+                    "reward": accuracy,
+                }
+            )
+        logits = prior + self.offsets
+        loss = covariance_loss(logits, states, [utilities[x] for x in states], prior, c.beta)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        if not torch.isfinite(self.offsets).all():
+            raise RuntimeError("Non-finite fitted graph logits")
+        self.observation_history.extend(observations)
+        self._fit_gp()
+        # Contribution and cost feedback use the same retained calibration states.
+        contributions = torch.tensor(
+            [[accuracies[x] * bit for bit in x.nodes] for x in states], dtype=torch.float64
+        ).mean(0)
+        costs = torch.tensor(
+            [[sum(row) / (self.n - 1) for row in x.edges] for x in states], dtype=torch.float64
+        ).mean(0)
+        self.update_energy(contributions, costs)
+        return {
+            "loss": float(loss.detach()),
+            "accuracy": sum(accuracies[x] for x in states) / len(states),
+            "utility": sum(utilities[x] for x in states) / len(states),
+            "solved": sum(accuracies.values()) * len(batch),
+            "executed": len(utilities) * len(batch),
+        }
+
+    def _fit_gp(self):
+        # Sufficient statistics per pair keep inducing updates independent of history length.
+        sums = torch.zeros(len(self.pairs), dtype=torch.float64)
+        counts = torch.zeros_like(sums)
+        index = {i * self.n + j: k for k, (i, j) in enumerate(self.pairs)}
+        for observation in self.observation_history:
+            for edge in observation["active_edges"]:
+                k = index[edge]
+                sums[k] += observation["reward"]
+                counts[k] += 1
+        observed = counts > 0
+        if observed.any():
+            # One empirical contribution score per ordered pair is the GP observation.
+            self.gp.fit(self.features[observed], sums[observed] / counts[observed])
+        self._refresh_scores()
+
+    def train(self, train_data, eval_fn, num_iterations=None, batch_size=None, verbose=True):
+        """Synchronous calibration; async applications can await ``atrain``."""
+        return asyncio.run(self.atrain(train_data, eval_fn, num_iterations, batch_size, verbose))
+
+    async def atrain(self, train_data, eval_fn, num_iterations=None, batch_size=None, verbose=True):
+        self._require_graph()
+        c = self.config.optimization
+        iterations = c.num_iterations if num_iterations is None else num_iterations
+        size = c.batch_size if batch_size is None else batch_size
+        if (
+            not train_data
+            or not isinstance(iterations, int)
+            or iterations < 1
+            or not isinstance(size, int)
+            or size < 1
+        ):
+            raise ValueError(
+                "Training data, iteration count and batch size must be nonempty/positive"
+            )
         stats = {
-            "total_solved": 0,
+            "total_solved": 0.0,
             "total_executed": 0,
             "losses": [],
             "accuracies": [],
-            "edge_uncertainty": []
+            "utilities": [],
+            "edge_uncertainty": [],
         }
-        
-        for iteration in range(num_iterations):
-            if verbose:
-                print(f"Iteration {iteration + 1}/{num_iterations}")
-            
-            for batch_idx in range(0, len(train_data), batch_size):
-                batch = train_data[batch_idx:batch_idx + batch_size]
-                batch_stats = asyncio.get_event_loop().run_until_complete(
-                    self._train_batch(batch, eval_fn)
-                )
-                
-                stats["total_solved"] += batch_stats["solved"]
-                stats["total_executed"] += batch_stats["executed"]
-                stats["losses"].append(batch_stats["loss"])
-                
-                # Track uncertainty
-                if self.edge_vars is not None:
-                    avg_uncertainty = self.edge_vars.mean().item()
-                    stats["edge_uncertainty"].append(avg_uncertainty)
-                
-                accuracy = stats["total_solved"] / stats["total_executed"]
-                stats["accuracies"].append(accuracy)
-                
+        for iteration in range(iterations):
+            for start in range(0, len(train_data), size):
+                result = await self._train_batch(train_data[start : start + size], eval_fn)
+                stats["total_solved"] += result["solved"]
+                stats["total_executed"] += result["executed"]
+                stats["losses"].append(result["loss"])
+                stats["accuracies"].append(result["accuracy"])
+                stats["utilities"].append(result["utility"])
+                rows, cols = zip(*self.pairs)
+                stats["edge_uncertainty"].append(float(self.edge_vars[rows, cols].mean()))
                 if verbose:
-                    uncertainty = stats["edge_uncertainty"][-1] if stats["edge_uncertainty"] else 0
-                    print(f"  Batch {batch_idx // batch_size + 1}: "
-                          f"Acc={accuracy:.4f}, Loss={batch_stats['loss']:.4f}, "
-                          f"Uncertainty={uncertainty:.4f}")
-        
+                    print(
+                        f"Iteration {iteration + 1}: accuracy={result['accuracy']:.4f}, utility={result['utility']:.4f}"
+                    )
         self.training_history.append(stats)
         return stats
 
-    async def _train_batch(
-        self,
-        batch: List[Dict[str, Any]],
-        eval_fn
-    ) -> Dict[str, Any]:
-        """Train on a single batch with Bayesian optimization."""
-        tasks = []
-        answers = []
-        observations = []
-        
-        for record in batch:
-            task = record["task"]
-            answer = record["answer"]
-            answers.append(answer)
-            
-            input_dict = {"task": task}
-            
-            # Sample edges using Bayesian method
-            if self.use_mcmc and HAS_PYRO:
-                active_edges, log_prob = self._mcmc_sample_edges(0)
-            else:
-                active_edges, log_prob = self._gp_sample_edges()
-            
-            tasks.append(self._run_with_edges(input_dict, active_edges))
-            observations.append({
-                "active_edges": active_edges,
-                "log_prob": log_prob
-            })
-        
-        results = await asyncio.gather(*tasks)
-        
-        loss_list = []
-        solved = 0
-        
-        for i, ((raw_answer, _), true_answer) in enumerate(zip(results, answers)):
-            prediction = raw_answer[0] if raw_answer else ""
-            utility = eval_fn(prediction, true_answer)
-            
-            if utility > 0:
-                solved += 1
-            
-            # Update observation with reward
-            observations[i]["reward"] = utility
-            
-            # Policy gradient loss
-            log_prob = observations[i]["log_prob"]
-            single_loss = -log_prob * utility
-            loss_list.append(single_loss)
-        
-        # Update edge statistics with observations
-        self._update_edge_statistics(observations)
-        self.observation_history.extend(observations)
-        
-        if loss_list and self.optimizer:
-            total_loss = torch.mean(torch.stack(loss_list))
-            self.optimizer.zero_grad()
-            total_loss.backward()
-            self.optimizer.step()
-            loss_value = total_loss.item()
-        else:
-            loss_value = 0.0
-        
-        return {
-            "solved": solved,
-            "executed": len(batch),
-            "loss": loss_value
-        }
-
-    async def _run_with_edges(
-        self,
-        inputs: Dict[str, Any],
-        active_edges: List[int]
-    ) -> Tuple[List[Any], torch.Tensor]:
-        """Run inference with specified active edges."""
-        if self.graph is None:
-            return [], torch.tensor(0.0)
-        
-        n = len(self.graph.agent_names)
-        
-        # Set masks based on active edges
-        mask = torch.zeros(n * n)
-        for edge_idx in active_edges:
-            if edge_idx < len(mask):
-                mask[edge_idx] = 1.0
-        
-        # Temporarily override masks
-        original_masks = self.graph.spatial_masks.data.clone()
-        self.graph.spatial_masks.data = mask
-        
-        try:
-            answers, log_probs = await self.graph.arun(inputs, self.config.num_rounds)
-        finally:
-            # Restore original masks
-            self.graph.spatial_masks.data = original_masks
-        
-        return answers, log_probs
-
-    async def run(
-        self,
-        inputs: Dict[str, Any],
-        num_rounds: Optional[int] = None,
-        use_mean: bool = True
-    ) -> Tuple[List[Any], Dict[str, Any]]:
-        """
-        Run optimized inference.
-        
-        Args:
-            inputs: Input dictionary with 'task' key
-            num_rounds: Number of inference rounds
-            use_mean: Use mean edge weights (vs sampling)
-            
-        Returns:
-            Tuple of (answers, metadata)
-        """
-        if self.graph is None:
-            raise ValueError("Graph must be set before running")
-        
-        num_rounds = num_rounds or self.config.num_rounds
-        
-        if use_mean and self.edge_means is not None:
-            # Use learned mean edge weights
-            n = len(self.graph.agent_names)
-            active_edges = []
-            
-            for i in range(len(self.edge_means)):
-                if self.edge_means[i] > 0:  # Positive mean = likely useful
-                    active_edges.append(i)
-            
-            answers, log_probs = await self._run_with_edges(inputs, active_edges)
-        else:
-            # Sample edges
-            if self.use_mcmc and HAS_PYRO:
-                active_edges, _ = self._mcmc_sample_edges(0)
-            else:
-                active_edges, _ = self._gp_sample_edges()
-            
-            answers, log_probs = await self._run_with_edges(inputs, active_edges)
-        
+    async def run(self, inputs, num_rounds=None, use_mean=True):
+        """Deploy Algorithm 2; use_mean=True aggregates deployment_samples draws."""
+        self._require_graph()
+        c = self.config.optimization
+        node_probs, edge_probs = self.probabilities()
+        state = deployment_state(
+            node_probs,
+            edge_probs,
+            self.graph.fixed_spatial_masks,
+            c.deployment_samples if use_mean else 1,
+            c.consensus_threshold,
+            self.generator,
+        )
+        answers, _ = await self.graph.arun_state(inputs, state, num_rounds)
         metadata = {
-            "log_probs": log_probs.item() if isinstance(log_probs, torch.Tensor) else log_probs,
-            "active_edges": len(active_edges) if 'active_edges' in dir() else 0,
-            "use_mcmc": self.use_mcmc,
-            "strategy": "bayesian"
+            "strategy": "bayesian",
+            "sampling": "independent-repair-consensus",
+            "active_nodes": sum(state.nodes),
+            "active_edges": sum(map(sum, state.edges)),
+            "node_mask": list(state.nodes),
+            "adjacency": [list(row) for row in state.edges],
+            "calibration_mcmc": c.use_mcmc,
+            "deployment_samples": c.deployment_samples if use_mean else 1,
         }
-        
         return answers, metadata
 
-    def run_sync(
-        self,
-        inputs: Dict[str, Any],
-        num_rounds: Optional[int] = None
-    ) -> Tuple[List[Any], Dict[str, Any]]:
-        """Synchronous inference."""
-        return asyncio.get_event_loop().run_until_complete(
-            self.run(inputs, num_rounds)
-        )
+    def run_sync(self, inputs, num_rounds=None):
+        return asyncio.run(self.run(inputs, num_rounds))
 
-    def get_edge_statistics(self) -> Dict[str, Any]:
-        """Get statistics about edge weights."""
-        if self.edge_means is None or self.edge_vars is None:
+    def get_edge_statistics(self):
+        if self.graph is None:
             return {}
-        
+        r, p = self.probabilities()
+        rows, cols = zip(*self.pairs)
         return {
             "spatial": {
-                "mean": self.edge_means.mean().item(),
-                "std": self.edge_means.std().item(),
-                "uncertainty_mean": self.edge_vars.mean().item(),
-                "positive_edges": (self.edge_means > 0).sum().item()
+                "mean": float(self.edge_means[rows, cols].mean()),
+                "std": float(self.edge_means[rows, cols].std()),
+                "uncertainty_mean": float(self.edge_vars[rows, cols].mean()),
+                "probabilities": p.tolist(),
             },
-            "temporal": {
-                "mean": self.temporal_edge_means.mean().item() if self.temporal_edge_means is not None else 0,
-                "std": self.temporal_edge_means.std().item() if self.temporal_edge_means is not None else 0,
-                "uncertainty_mean": self.temporal_edge_vars.mean().item() if self.temporal_edge_vars is not None else 0
-            },
-            "observations": len(self.observation_history)
+            "node_probabilities": r.tolist(),
+            "energy": self.energy.tolist(),
+            "completeness": self.completeness.tolist(),
+            "observations": len(self.observation_history),
         }
 
-    def save(self, path: str):
-        """Save strategy state."""
-        state = {
-            "edge_means": self.edge_means,
-            "edge_vars": self.edge_vars,
-            "temporal_edge_means": self.temporal_edge_means,
-            "temporal_edge_vars": self.temporal_edge_vars,
-            "observation_history": self.observation_history,
-            "training_history": self.training_history
-        }
-        torch.save(state, path)
+    def save(self, path):
+        self._require_graph()
+        optimization = asdict(self.config.optimization)
+        strategy = optimization["strategy"]
+        optimization["strategy"] = getattr(strategy, "value", strategy)
+        torch.save(
+            {
+                "version": 2,
+                "n": self.n,
+                "optimization": optimization,
+                "offsets": self.offsets.detach(),
+                "energy": self.energy,
+                "completeness": self.completeness,
+                "gp_mean": self.gp.mean,
+                "gp_covariance": self.gp.covariance,
+                "rng": self.generator.get_state(),
+                "optimizer": self.optimizer.state_dict(),
+                "training_history": self.training_history,
+                "observation_history": self.observation_history,
+            },
+            path,
+        )
 
-    def load(self, path: str):
-        """Load strategy state."""
-        state = torch.load(path)
-        self.edge_means = state.get("edge_means")
-        self.edge_vars = state.get("edge_vars")
-        self.temporal_edge_means = state.get("temporal_edge_means")
-        self.temporal_edge_vars = state.get("temporal_edge_vars")
-        self.observation_history = state.get("observation_history", [])
-        self.training_history = state.get("training_history", [])
+    def load(self, path):
+        self._require_graph()
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        if state.get("version") != 2 or state["n"] != self.n:
+            raise ValueError(
+                "Expected a version-2 joint node/edge checkpoint with matching agent count"
+            )
+        config = OptimizationConfig(**state["optimization"])
+        old_config = self.config.optimization
+        self.config.optimization = config
+        try:
+            self._validate_config()
+        except (ValueError, TypeError):
+            self.config.optimization = old_config
+            raise
+        self.set_graph(self.graph)
+        for name in ["energy", "completeness"]:
+            value = state[name]
+            if value.shape != (self.n,) or not torch.isfinite(value).all():
+                raise ValueError(f"Invalid checkpoint {name}")
+        validate_unit(state["completeness"], "Checkpoint completeness")
+        if ((state["energy"] < config.energy_min) | (state["energy"] > config.energy_max)).any():
+            raise ValueError("Checkpoint energies are outside configured bounds")
+        if (
+            state["offsets"].shape != self.offsets.shape
+            or not torch.isfinite(state["offsets"]).all()
+        ):
+            raise ValueError("Invalid checkpoint logits")
+        if (
+            state["gp_mean"].shape != self.gp.mean.shape
+            or state["gp_covariance"].shape != self.gp.covariance.shape
+        ):
+            raise ValueError("Invalid checkpoint GP dimensions")
+        if (
+            not torch.isfinite(state["gp_mean"]).all()
+            or not torch.isfinite(state["gp_covariance"]).all()
+        ):
+            raise ValueError("Invalid checkpoint GP moments")
+        covariance = state["gp_covariance"]
+        if (
+            not torch.allclose(covariance, covariance.T)
+            or torch.linalg.eigvalsh(covariance).min() < -1e-10
+        ):
+            raise ValueError("Checkpoint GP covariance must be positive semidefinite")
+        with torch.no_grad():
+            self.offsets.copy_(state["offsets"])
+        self.energy, self.completeness = state["energy"], state["completeness"]
+        self.gp.mean, self.gp.covariance = state["gp_mean"], state["gp_covariance"]
+        self.generator.set_state(state["rng"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.observation_history = state["observation_history"]
+        self.training_history = state["training_history"]
+        self._refresh_scores()

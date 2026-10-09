@@ -6,6 +6,7 @@ from abc import ABC
 import numpy as np
 import torch
 import asyncio
+import copy
 
 from beam.core.node import AgentNode
 from beam.core.config import BEAMConfig
@@ -393,6 +394,70 @@ class AgentGraph(ABC):
             final_answers = ["No answer from decision node"]
         
         return final_answers, log_probs
+
+    async def arun_state(
+        self, inputs, state, num_rounds=None, max_retries=3, max_time=600
+    ) -> Tuple[List[Any], torch.Tensor]:
+        """Execute a feasible state exactly, with request-local agent buffers.
+
+        Spatial edges are fixed by A. Cross-round memory follows the configured
+        temporal mask, restricted to active endpoints, and is deterministic.
+        LLM clients and execution callbacks are shared; outputs/connections are not.
+        """
+        from beam.core.probability import GraphState
+
+        if not isinstance(state, GraphState) or not state.feasible():
+            raise ValueError("Expected a feasible GraphState")
+        if len(state.nodes) != len(self.nodes):
+            raise ValueError("State size must match the registered agents")
+        rounds = self.num_rounds if num_rounds is None else num_rounds
+        if not isinstance(rounds, int) or rounds < 1 or max_retries < 1 or max_time <= 0:
+            raise ValueError("Round count, retries and timeout must be positive")
+        if not any(state.nodes):
+            return [], torch.tensor(0.0)
+
+        def isolated(node):
+            result = copy.copy(node)
+            result.clear_connections()
+            result.inputs, result.outputs, result.raw_inputs = [], [], []
+            result.last_memory = {"inputs": [], "outputs": [], "raw_inputs": []}
+            return result
+
+        nodes = [isolated(node) for node in self.nodes.values()]
+        decision = isolated(self.decision_node) if self.decision_node else None
+        order = [i for i in state.topological_order() if state.nodes[i]]
+        for i in order:
+            for j in order:
+                if state.edges[i][j]:
+                    nodes[i].add_successor(nodes[j], "spatial")
+
+        async def execute(node):
+            for attempt in range(max_retries):
+                try:
+                    await asyncio.wait_for(node.async_execute(inputs), timeout=max_time)
+                    return
+                except Exception:
+                    if attempt == max_retries - 1:
+                        raise
+
+        for round_idx in range(rounds):
+            if round_idx == 1:
+                for i in order:
+                    for j in order:
+                        if self.fixed_temporal_masks[i, j]:
+                            nodes[i].add_successor(nodes[j], "temporal")
+            for i in order:
+                await execute(nodes[i])
+            for i in order:
+                nodes[i].update_memory()
+        if decision:
+            for i in order:
+                nodes[i].add_successor(decision)
+            await execute(decision)
+            answers = decision.outputs
+        else:
+            answers = nodes[order[-1]].outputs
+        return answers, torch.tensor(0.0)
 
     def get_trainable_parameters(self) -> List[torch.nn.Parameter]:
         """Get all trainable parameters for optimization."""

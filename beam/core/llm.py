@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from typing import List, Union, Optional, Dict, Any
 from dataclasses import dataclass
 import asyncio
-import aiohttp
 from openai import AsyncOpenAI
 import async_timeout
 from tenacity import retry, wait_random_exponential, stop_after_attempt, wait_fixed

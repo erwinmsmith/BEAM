@@ -368,33 +368,34 @@ strategy = AgentDropout(config)
 
 ### AgentBayesian
 
-Uses Bayesian optimization with optional MCMC sampling for uncertainty-aware pruning.
+Jointly calibrates agent participation and communication edges using a KL-regularized utility, bounded energy updates and pairwise GP uncertainty.
 
 ```python
-from beam import AgentBayesian, OptimizationConfig
+from beam import AgentBayesian, BEAMConfig, OptimizationConfig
 
 config = BEAMConfig(
-    # ...
+    # Supply AgentConfig entries and register the corresponding graph nodes.
     optimization=OptimizationConfig(
         strategy="bayesian",
-        optimize_spatial=True,
-        optimize_temporal=True,
-        use_mcmc=True,           # Enable MCMC sampling
-        mcmc_samples=100,        # Number of MCMC samples
-        prior_mean=0.5,          # Prior edge probability
-    )
+        use_mcmc=True,
+        mcmc_samples=100,       # Retained calibration states
+        mcmc_warmup=20,
+        beta=2.0,
+        deployment_samples=10,
+        consensus_threshold=0.5,
+        random_seed=7,
+    ),
 )
-
 strategy = AgentBayesian(config)
+strategy.set_graph(graph)
+strategy.set_completeness([1.0] * len(graph.nodes))
+strategy.train(train_data, eval_fn)
+answers, metadata = await strategy.run({"task": "..."})
 ```
 
-**Best for**: When you need confidence estimates or have limited training data.
+Calibration uses the fixed structural reference and the centered gradient of expected utility minus KL regularization. Deployment draws node/edge states, repairs cycles and forms a strict edge-frequency consensus. `sample_reference(utility)` exposes the utility-tilted lazy Metropolis–Hastings chain.
 
-**How it works**:
-1. Maintains posterior distribution over edge weights
-2. Uses MCMC (optional) to sample from posterior
-3. Provides uncertainty estimates for pruning decisions
-4. More robust with small datasets
+See [the probability model and implementation](docs/models/beam-theory.md) and the [offline example](beam/examples/theory_alignment.py).
 
 ---
 

@@ -57,6 +57,17 @@ class TokenOptimizer:
         # Training state
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.training_history: List[Dict[str, Any]] = []
+        self._bayesian_strategy = None
+
+    def _bayesian(self):
+        from beam.strategies.bayesian import AgentBayesian
+
+        if self.graph is None:
+            raise ValueError("Graph must be set before using the optimizer")
+        if self._bayesian_strategy is None or self._bayesian_strategy.graph is not self.graph:
+            self._bayesian_strategy = AgentBayesian(self.config)
+            self._bayesian_strategy.set_graph(self.graph)
+        return self._bayesian_strategy
         
     def _setup_optimizer(self):
         """Setup PyTorch optimizer for trainable parameters."""
@@ -93,6 +104,10 @@ class TokenOptimizer:
         Returns:
             Training statistics
         """
+        if self.strategy == OptimizationStrategy.BAYESIAN:
+            result = self._bayesian().train(train_data, eval_fn, num_iterations, batch_size, verbose)
+            self.training_history = self._bayesian_strategy.training_history
+            return result
         num_iterations = num_iterations or self.config.optimization.num_iterations
         batch_size = batch_size or self.config.optimization.batch_size
         pruning_rate = pruning_rate or self.config.optimization.pruning_rate
@@ -211,6 +226,8 @@ class TokenOptimizer:
         """
         if self.graph is None:
             raise ValueError("Graph must be set before running")
+        if self.strategy == OptimizationStrategy.BAYESIAN:
+            return await self._bayesian().run(inputs, num_rounds)
         
         num_rounds = num_rounds or self.config.num_rounds
         
@@ -230,12 +247,16 @@ class TokenOptimizer:
         num_rounds: Optional[int] = None
     ) -> Tuple[List[Any], Dict[str, Any]]:
         """Synchronous version of run."""
+        if self.strategy == OptimizationStrategy.BAYESIAN:
+            return self._bayesian().run_sync(inputs, num_rounds)
         return asyncio.get_event_loop().run_until_complete(
             self.run(inputs, num_rounds)
         )
 
     def save_state(self, path: str):
         """Save optimizer state to file."""
+        if self.strategy == OptimizationStrategy.BAYESIAN:
+            return self._bayesian().save(path)
         state = {
             "config": self.config.to_dict(),
             "spatial_logits": self.graph.spatial_logits.data if self.graph else None,
@@ -248,6 +269,10 @@ class TokenOptimizer:
 
     def load_state(self, path: str):
         """Load optimizer state from file."""
+        if self.strategy == OptimizationStrategy.BAYESIAN:
+            self._bayesian().load(path)
+            self.training_history = self._bayesian_strategy.training_history
+            return
         state = torch.load(path)
         
         if self.graph:
@@ -266,6 +291,8 @@ class TokenOptimizer:
         """Get statistics about current edge weights."""
         if self.graph is None:
             return {}
+        if self.strategy == OptimizationStrategy.BAYESIAN:
+            return self._bayesian().get_edge_statistics()
         
         spatial_probs = torch.sigmoid(self.graph.spatial_logits)
         temporal_probs = torch.sigmoid(self.graph.temporal_logits)

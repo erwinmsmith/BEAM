@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beam-mas"
-version = "0.1.0"
+version = "0.2.0"
 description = "BEAM: A Bayesian Energy-Aware Framework for Multi-Agent Communication Optimization under Incomplete Information"
 readme = "README.md"
 license = {text = "MIT"}
@@ -52,10 +52,7 @@ langchain = [
 langgraph = [
     "langgraph>=0.0.20",
 ]
-bayesian = [
-    "scikit-learn>=1.0.0",
-    "pyro-ppl>=1.8.0",
-]
+bayesian = []  # Joint graph sampling and sparse GP moments use the core PyTorch dependency.
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -68,9 +65,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/beam-mas/beam"
-Documentation = "https://github.com/beam-mas/beam#readme"
-Repository = "https://github.com/beam-mas/beam"
+Homepage = "https://github.com/erwinmsmith/BEAM"
+Documentation = "https://github.com/erwinmsmith/BEAM#readme"
+Repository = "https://github.com/erwinmsmith/BEAM"
 
 [tool.setuptools.packages.find]
 where = ["."]
