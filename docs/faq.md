@@ -1,12 +1,12 @@
 # FAQ
 
-## Which interface implements the paper's joint model?
+## How do I use joint agent and edge selection?
 
-Use `AgentBayesian`, or `TokenOptimizer` with `strategy="bayesian"`. The [paper-to-code map](models/paper-to-code.md) lists the matching equations, algorithms and tests.
+Use `AgentBayesian`, or `TokenOptimizer` with `strategy="bayesian"`. The [implementation reference](models/implementation.md) describes the core components and their tests.
 
 ## How do I run the project without an API key?
 
-Run `python -m beam.examples.theory_alignment`. It uses deterministic callbacks on CPU.
+Run `python -m beam.examples.bayesian_workflow`. It uses deterministic callbacks on CPU.
 
 ## What does the completeness coefficient mean?
 

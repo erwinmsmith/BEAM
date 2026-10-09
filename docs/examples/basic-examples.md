@@ -3,7 +3,7 @@
 Run:
 
 ```bash
-python -m beam.examples.theory_alignment
+python -m beam.examples.bayesian_workflow
 ```
 
 The example uses three deterministic solver callbacks and an aggregation callback. It prints the calibration score, number of retained reference states, final answer and deployment metadata.
@@ -12,7 +12,7 @@ The example uses three deterministic solver callbacks and an aggregation callbac
 
 ```python
 import asyncio
-from beam.examples.theory_alignment import build_example
+from beam.examples.bayesian_workflow import build_example
 
 strategy = build_example()
 answers, metadata = asyncio.run(strategy.run({"task": "What is 2 + 2?"}))

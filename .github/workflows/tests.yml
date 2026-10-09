@@ -20,7 +20,7 @@ jobs:
       - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: python -m pip install -e '.[dev]'
       - run: python -m pytest -q
-      - run: python -m beam.examples.theory_alignment
+      - run: python -m beam.examples.bayesian_workflow
   docs:
     runs-on: ubuntu-latest
     steps:

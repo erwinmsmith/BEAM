@@ -1,8 +1,20 @@
-# BEAM
+<p align="center">
+  <img src="assets/beamlogo.png" alt="BEAM Logo" width="400">
+</p>
 
-**A Bayesian Energy-Aware Framework for Multi-Agent Communication Optimization under Incomplete Information**
+<h1 align="center">BEAM</h1>
 
-[Documentation](https://erwinmsmith.github.io/BEAM/) · [Quick start](https://erwinmsmith.github.io/BEAM/getting-started/quickstart/) · [Paper → code](https://erwinmsmith.github.io/BEAM/models/paper-to-code/) · [Tests](https://github.com/erwinmsmith/BEAM/actions/workflows/tests.yml)
+<p align="center">
+  <b>A Bayesian Energy-Aware Framework for Multi-Agent Communication Optimization under Incomplete Information</b>
+</p>
+
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+"></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg" alt="PyTorch"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+</p>
+
+[Documentation](https://erwinmsmith.github.io/BEAM/) · [Quick start](https://erwinmsmith.github.io/BEAM/getting-started/quickstart/) · [Tests](https://github.com/erwinmsmith/BEAM/actions/workflows/tests.yml)
 
 BEAM jointly models agent participation and communication links. Bounded energy combines contribution and cost, pairwise Gaussian-process moments represent uncertainty, and a KL-regularized objective calibrates the graph distribution. Deployment constructs a feasible DAG and executes its selected agents and links.
 
@@ -14,7 +26,7 @@ cd BEAM
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-python -m beam.examples.theory_alignment
+python -m beam.examples.bayesian_workflow
 ```
 
 The example runs calibration, fixed-target reference sampling and deployment on CPU with deterministic callbacks. It requires no API key. Python 3.9+ and PyTorch 2.0+ are supported.
@@ -32,7 +44,7 @@ The example runs calibration, fixed-target reference sampling and deployment on 
 
 ```python
 import asyncio
-from beam.examples.theory_alignment import build_example
+from beam.examples.bayesian_workflow import build_example
 
 async def main():
     strategy = build_example()
@@ -63,6 +75,13 @@ Tests enumerate all 38 feasible three-agent states and verify detailed balance, 
 
 ## Integrations and strategy interfaces
 
+<p align="center">
+  <img src="https://img.shields.io/badge/LangChain-Integration-blue?style=for-the-badge" alt="LangChain">
+  <img src="https://img.shields.io/badge/LangGraph-Integration-purple?style=for-the-badge" alt="LangGraph">
+  <img src="https://img.shields.io/badge/OpenAI-API-412991?style=for-the-badge&logo=openai&logoColor=white" alt="OpenAI">
+  <img src="https://img.shields.io/badge/PyTorch-Framework-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch">
+</p>
+
 - **AgentBayesian** implements the joint model and algorithms above; `TokenOptimizer(config, graph)` delegates to it when `config.optimization.strategy="bayesian"`.
 - **AgentPrune** and **AgentDropout** expose separate edge-pruning and agent-skipping interfaces.
 - **LangChain** runnables can supply an agent's execution callback.
@@ -72,7 +91,7 @@ Optional integrations: `python -m pip install -e '.[langchain,langgraph]'`.
 
 ## Citation
 
-Use [CITATION.cff](CITATION.cff) for this software release. The [paper-to-code map](https://erwinmsmith.github.io/BEAM/models/paper-to-code/) connects the manuscript's equations and algorithms to source and tests.
+Use [CITATION.cff](CITATION.cff) for this software release.
 
 ## License
 

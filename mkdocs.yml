@@ -9,9 +9,20 @@ theme:
   name: material
   language: en
   palette:
-    scheme: default
-    primary: indigo
-    accent: indigo
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
   features:
     - navigation.tabs
     - navigation.sections
@@ -36,7 +47,7 @@ nav:
       - Configuration: getting-started/config.md
   - Algorithms:
       - Probability model: models/beam-theory.md
-      - Paper to code: models/paper-to-code.md
+      - Implementation reference: models/implementation.md
       - Strategy interfaces: models/strategies.md
   - Build:
       - API reference: api-reference/apireference.md

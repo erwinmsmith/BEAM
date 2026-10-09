@@ -5,7 +5,7 @@
 ```bash
 python -m pip install -e '.[dev]'
 python -m pytest -q
-python -m beam.examples.theory_alignment
+python -m beam.examples.bayesian_workflow
 python -m pip install -r requirements-docs.txt
 python -m mkdocs build --strict
 python scripts/check_site.py
@@ -38,4 +38,4 @@ Set `random_seed` for the graph sampler. Version-2 checkpoints contain fitted of
 
 Keep each reference chain's utility and parameters fixed. Apply energy and GP updates between calibration batches. LLM evaluations belong to your chosen task protocol; the included regression suite uses deterministic callbacks.
 
-[Algorithm mapping](models/paper-to-code.md) · [Latest CI runs](https://github.com/erwinmsmith/BEAM/actions)
+[Algorithm mapping](models/implementation.md) · [Latest CI runs](https://github.com/erwinmsmith/BEAM/actions)

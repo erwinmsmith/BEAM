@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/beamlogo.png" alt="BEAM Logo" width="400">
+</p>
+
 # BEAM
 
 **A Bayesian Energy-Aware Framework for Multi-Agent Communication Optimization under Incomplete Information**
@@ -20,7 +24,7 @@ This CPU example runs calibration, reference sampling, and deployment with deter
 git clone https://github.com/erwinmsmith/BEAM.git
 cd BEAM
 python -m pip install -e .
-python -m beam.examples.theory_alignment
+python -m beam.examples.bayesian_workflow
 ```
 
 ## Documentation
@@ -30,7 +34,7 @@ python -m beam.examples.theory_alignment
 | [Installation](getting-started/installation.md) | Set up Python and optional integrations |
 | [Quick start](getting-started/quickstart.md) | Run a complete local example |
 | [Probability model](models/beam-theory.md) | Follow the model and sampling algorithms |
-| [Paper to code](models/paper-to-code.md) | Locate the implementation of each algorithm |
+| [Implementation reference](models/implementation.md) | Locate the implementation of each algorithm |
 | [Configuration](getting-started/config.md) | Configure calibration, energy, and deployment |
 | [API reference](api-reference/apireference.md) | Build and execute agent graphs |
 | [Engineering](advanced.md) | Run tests and maintain these Markdown docs |

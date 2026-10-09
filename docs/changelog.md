@@ -2,7 +2,7 @@
 
 ## Documentation and Pages publishing
 
-- Adopted standard MkDocs Material with Markdown pages, quick start and paper-to-code mapping.
+- Adopted standard MkDocs Material with Markdown pages, quick start and implementation referenceping.
 - Updated API, configuration and integration examples to match the current implementation.
 - Added strict static-site and documentation-example checks.
 - Published through GitHub Pages artifacts from `main`.

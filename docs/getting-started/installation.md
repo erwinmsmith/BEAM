@@ -30,7 +30,7 @@ The `bayesian` installation extra remains an alias for the core implementation. 
 ## Verify the installation
 
 ```bash
-python -m beam.examples.theory_alignment
+python -m beam.examples.bayesian_workflow
 python -m pytest -q
 ```
 

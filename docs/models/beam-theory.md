@@ -42,7 +42,7 @@ covariance = K_XX - B K_ZX + B S B^T
 
 Cholesky solves implement the matrix operations. Before observations, `m=0` and `S=K_ZZ`, so the full prior variance is recovered even with fewer inducing inputs than pair inputs. Calibration forms one empirical contribution score per observed pair by averaging its active-state rewards. A Gaussian observation model gives closed-form inducing mean and covariance updates. GP configuration controls the kernel length scale, amplitude, observation variance, inducing count and diagonal jitter.
 
-## Fixed-target reference chain — Algorithm 1
+## Fixed-target reference chain
 
 `await strategy.sample_reference(utility)` samples the target
 
@@ -77,7 +77,7 @@ Centering cancels both DAG normalizers. With `use_mcmc=True`, the lazy coordinat
 
 `accuracies` and `utilities` summarize retained variational states. `total_executed` counts evaluated graph/example combinations, including the empty state's defined zero score. GP and energy feedback is applied after the graph gradient step.
 
-## Deployment — Algorithm 2
+## Deployment
 
 `await strategy.run(inputs, num_rounds=...)` draws nodes and candidate edges independently, removes edges with inactive endpoints, then repairs cycles. A deterministic DFS selects the first cycle, and its lowest-score edge is removed; ties use `(sender_index, receiver_index)`.
 
@@ -98,7 +98,7 @@ The configured spatial mask defines the deployment candidate set. Reference cali
 Run the complete offline example:
 
 ```bash
-python -m beam.examples.theory_alignment
+python -m beam.examples.bayesian_workflow
 python -m pytest -q
 ```
 
