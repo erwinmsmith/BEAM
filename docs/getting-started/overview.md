@@ -1,121 +1,25 @@
-# Project Overview
+# Architecture
 
-Understanding BEAM's architecture and workflow will help you use it effectively.
+BEAM represents a communication state as a joint node mask and directed adjacency matrix. Participation decides which agents run; edges decide which same-round messages they receive. Feasible states have no self-loops or directed cycles, and every retained edge has active endpoints.
 
----
+## The model
 
-## Architecture Overview
+1. **Observe.** Supply each agent's retained-information fraction. Update its bounded energy from contribution and cost feedback.
+2. **Represent uncertainty.** Pairwise GP moments feed Gaussian edge scores. Incident-edge probabilities and energy determine node probabilities.
+3. **Calibrate.** Fit a constrained Bernoulli graph family using expected bounded utility minus KL divergence to the structural reference.
+4. **Deploy.** Sample independent node/edge states, repair cycles and aggregate edge frequencies into a feasible DAG.
+5. **Execute.** Run active agents in topological order, with per-request output and memory buffers.
 
-BEAM is a framework designed to optimize communication efficiency in multi-agent LLM systems while maintaining output quality under incomplete information. It addresses the challenge of high inference costs in multi-agent architectures by learning which agent connections and communications are essential using Bayesian optimization techniques.
-BEAM consists of three main components:
+## Package layout
 
-**How It Works:**
+| Module | Responsibility |
+| --- | --- |
+| `beam/core/probability.py` | Graph states, MH transitions, covariance loss, GP moments, cycle repair and consensus |
+| `beam/strategies/bayesian.py` | Calibration, energy/observation updates, deployment and persistence |
+| `beam/core/graph.py` | Agent registration and execution |
+| `beam/core/config.py` | Dataclass configuration |
+| `beam/core/optimizer.py` | High-level training and inference entry point |
+| `beam/integrations/` | LangChain and LangGraph adapters |
+| `tests/` | Finite-state, numerical and execution checks |
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Multi-Agent System                             │
-│                                                                     │
-│   ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌──────────┐         │
-│   │ Agent 1 │───▶│ Agent 2 │───▶│ Agent 3 │───▶│ Decision │         │
-│   └─────────┘    └─────────┘    └─────────┘    └──────────┘         │
-│        │              │              │                              │
-│        └──────────────┴──────────────┘                              │
-│                       │                                             │
-│               BEAM Optimization                                     │
-│          (Bayesian Edge Learning)                                   │
-│                       ▼                                             │
-│   ┌─────────┐              ┌─────────┐    ┌──────────┐              │
-│   │ Agent 1 │─────────────▶│ Agent 3 │───▶│ Decision │              │
-│   └─────────┘              └─────────┘    └──────────┘              │
-│                                                                     │
-│   * Fewer tokens consumed    * Maintained accuracy                  │
-│   * Reduced latency          * Lower inference cost                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
----
-**Key Features:**
-
-| Feature | Description |
-| ------ |------------- |
-| Three Optimization Strategies | Unsupervised learning |
-| Extensible Prompt Management | Domain-specific prompt templates with registry |
-| Framework Integration | Lightweight utilities for popular frameworks |
-| Flexible Agent Design | Support custom functions or LLM-based agents |
-| Graph-based Architecture | Spatial and temporal agent connections |
-
----
-
-## Directory Structure
-
-BEAM organizes files in the following structure:
-
-### Project Directory
-
-```
-BEAM/
-├── beam/
-│   ├── __init__.py          # Package exports
-│   ├── core/
-│   │   ├── config.py        # BEAMConfig, OptimizationConfig, AgentConfig
-│   │   ├── graph.py         # AgentGraph - manages agent connections
-│   │   ├── node.py          # AgentNode - base agent class
-│   │   ├── llm.py           # BaseLLM, LLMRegistry
-│   │   └── optimizer.py     # TokenOptimizer - training orchestration
-│   ├── strategies/
-│   │   ├── prune.py         # AgentPrune strategy
-│   │   ├── dropout.py       # AgentDropout strategy
-│   │   └── bayesian.py      # AgentBayesian strategy
-│   ├── prompts/
-│   │   ├── template.py      # PromptTemplate, PromptSet
-│   │   └── registry.py      # PromptRegistry
-│   ├── integrations/
-│   │   ├── langchain.py     # LangChain utilities
-│   │   └── langgraph.py     # LangGraph utilities
-│   └── examples/
-│       ├── basic_usage.py
-│       └── prompts_example.py
-├── pyproject.toml           # Package configuration
-├── README.md
-└── requirements.txt
-```
-
-
-## Workflow Summary
-
-The BEAM framework follows a structured process to transform high-level objectives into optimized agent execution. The typical workflow consists of four stages:
-
-**Stage 1: Initialization & Configuration**
-1. Configure Settings: Define parameters in BEAMConfig, including API keys, model hyperparameters, and execution constraints.
-
-2. Register LLMs: Use the LLMRegistry to register and load the underlying large language models (e.g., GPT-4, Claude, or local models).
-
-3. Prepare Prompts: Set up task-specific instruction templates within the PromptRegistry for dynamic retrieval.
-
-**Stage 2: Architecture Construction**
-
-1. Define Nodes: Create multiple AgentNode instances, assigning specific functional roles and attributes to each.
-2. Build the Graph: Utilize AgentGraph to establish logical connections (Directed Acyclic Graphs) between agents.
-3. Initialize Optimizer: Set up the TokenOptimizer engine to oversee the orchestration and efficiency of the graph.
-
-**Stage 3: Optimization & Execution**
-
-1. Run Orchestration: Execute optimizer.py to manage the task flow across the agent network.
-2. Apply Strategies: Implement Prune or Dropout strategies to dynamically trim redundant paths or nodes.
-3. Token Allocation: Real-time adjustment of token distribution based on feedback to achieve the highest performance-to-cost ratio.
-
-**Stage 4: Output & Evaluation**
-
-1. Generate Results: Retrieve the final output generated through the optimized execution path.
-
-2. Analyze Metrics: Review token consumption reports and perform a cost-benefit analysis.
-
-3. Validate Robustness: Use provided scripts in the examples/ directory to verify the reliability and stability of the agent collaboration.
-
----
-
-## Next Steps
-
-Now that you understand the architecture, you can:
-
-- Three implementation strategies for BEAM **[strategies](../models/strategies.md)** 
+[Read the probability model](../models/beam-theory.md) or [run the example](quickstart.md).

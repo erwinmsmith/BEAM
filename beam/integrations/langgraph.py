@@ -131,39 +131,41 @@ def create_skip_condition(
 
 def apply_beam_masks(
     edges: List[tuple],
-    spatial_masks: List[List[int]]
+    spatial_masks: List[List[int]],
+    node_order: Optional[List[str]] = None,
 ) -> List[tuple]:
+    """Filter existing edges using the selected binary adjacency matrix.
+
+    Named endpoints require the same ``node_order`` used to construct the
+    matrix. Without it, endpoints must be integer matrix indices. The order
+    of retained edges is preserved.
     """
-    Filter edges based on BEAM's learned spatial masks.
-    
-    Use this to apply BEAM's pruning results to your LangGraph workflow.
-    
-    Args:
-        edges: Original list of (source, target) edges
-        spatial_masks: BEAM's learned spatial mask matrix
-        
-    Returns:
-        Filtered list of active edges
-        
-    Example:
-        ```python
-        # After BEAM training
-        masks = prune_strategy.graph.spatial_masks.view(n, n).tolist()
-        
-        original_edges = [("a", "b"), ("a", "c"), ("b", "c")]
-        active_edges = apply_beam_masks(original_edges, masks)
-        
-        # Build LangGraph with only active edges
-        for src, tgt in active_edges:
-            workflow.add_edge(src, tgt)
-        ```
-    """
-    # This is a utility - actual implementation depends on node ordering
-    # Users should map their node names to indices
-    return [
-        (src, tgt) for src, tgt in edges
-        # Placeholder - users implement actual mask lookup
-    ]
+    n = len(spatial_masks)
+    if any(len(row) != n for row in spatial_masks):
+        raise ValueError("spatial_masks must be square")
+    if any(value not in (0, 1) for row in spatial_masks for value in row):
+        raise ValueError("spatial_masks must contain binary values")
+    if node_order is not None:
+        if len(node_order) != n or len(set(node_order)) != n:
+            raise ValueError("node_order must contain one unique name per matrix row")
+        indices = {name: index for index, name in enumerate(node_order)}
+
+        def index_of(node):
+            if node not in indices:
+                raise ValueError(f"Unknown node: {node!r}")
+            return indices[node]
+    else:
+        def index_of(node):
+            if isinstance(node, bool) or not isinstance(node, int) or not 0 <= node < n:
+                raise ValueError("Use integer indices in range or provide node_order")
+            return node
+
+    selected = []
+    for source, target in edges:
+        i, j = index_of(source), index_of(target)
+        if spatial_masks[i][j]:
+            selected.append((source, target))
+    return selected
 
 
 def get_langgraph_config(

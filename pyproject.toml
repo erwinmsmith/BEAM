@@ -66,7 +66,7 @@ all = [
 
 [project.urls]
 Homepage = "https://github.com/erwinmsmith/BEAM"
-Documentation = "https://github.com/erwinmsmith/BEAM#readme"
+Documentation = "https://erwinmsmith.github.io/BEAM/"
 Repository = "https://github.com/erwinmsmith/BEAM"
 
 [tool.setuptools.packages.find]

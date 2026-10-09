@@ -1,85 +1,37 @@
 # Installation
 
-This guide will help you install BEAM on your system.
-
----
-
-## System Requirements
-
-BEAM requires the following system specifications:
-
-**Operating System:**
-
-- Linux (Ubuntu 18.04 or later recommended)
-- macOS 10.14 or later
-- Windows 10/11 with WSL2
-
-**Hardware Requirements:**
-
-| Component | Recommended |
-|-----------|-------------|
-| Python | 3.9+ |
-| PyTorch |  2.0.0+ |
-| OpenAI  | 1.0.0+ |
-
----
-
-## Installation Steps
-
-### Step 1: Create Virtual Environment
-
-Using conda (recommended):
+Use Python 3.9 or later. The core implementation uses PyTorch, NumPy and the package dependencies declared in `pyproject.toml`.
 
 ```bash
-conda create -n beam python=3.9
-conda activate beam
-```
-
-Using venv:
-
-```bash
-python -m venv beam-env
-source beam-env/bin/activate  # On Linux/macOS
-# beam-env\Scripts\activate   # On Windows
-```
-
-### Step 2: Clone the Repository
-
-```bash
-
 git clone https://github.com/erwinmsmith/BEAM.git
 cd BEAM
-pip install -e .
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
 
-### Step 3: Install Dependencies
+On Windows, activate the environment with `.venv\Scripts\activate`.
+
+## Optional tools
 
 ```bash
-# LangChain integration
-pip install -e ".[langchain]"
+# Development and tests
+python -m pip install -e '.[dev]'
 
-# LangGraph integration  
-pip install -e ".[langgraph]"
+# Framework adapters
+python -m pip install -e '.[langchain,langgraph]'
 
-# Bayesian/MCMC support
-pip install -e ".[bayesian]"
-
-# All dependencies
-pip install -e ".[all]"
-
-# Development tools
-pip install -e ".[dev]"
+# Static documentation
+python -m pip install -r requirements-docs.txt
 ```
 
-### Step 4: Verify Successful Installation
+The `bayesian` installation extra remains an alias for the core implementation. Both the discrete sampler and GP use PyTorch.
 
-```python
-import beam
-print(beam.__version__)
+## Verify the installation
+
+```bash
+python -m beam.examples.theory_alignment
+python -m pytest -q
 ```
 
----
-
-## Next Steps
-
-- [Quick Start Tutorial](quickstart.md) - Train your first model in 5 minutes
+The example uses deterministic agent callbacks. To connect a live model, provide your own LLM client to `AgentNode` or use a [LangChain runnable](../models/LangChain.md). Keep API keys in environment variables.

@@ -1,82 +1,69 @@
-# 项目基本信息
-site_name: BEAM Documentation
-site_description: Token-efficient multi-agent inference framework
-site_author: erwinmsmith
+site_name: BEAM
+site_description: Bayesian energy-aware communication for LLM multi-agent systems.
 site_url: https://erwinmsmith.github.io/BEAM/
 repo_url: https://github.com/erwinmsmith/BEAM
+repo_name: erwinmsmith/BEAM
 edit_uri: edit/main/docs/
-
-# 主题配置 
+strict: true
 theme:
   name: material
-  language: zh  # 设置为中文界面
+  language: en
   palette:
-    # 浅色模式
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-7
-        name: 切换至深色模式
-    # 深色模式
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-4
-        name: 切换至浅色模式
+    scheme: default
+    primary: indigo
+    accent: indigo
   features:
-    - navigation.tabs      # 开启顶部大栏目导航
-    - navigation.sections  # 侧边栏分组显示
-    - navigation.expand    # 默认展开侧边栏
-    - navigation.top       # 回到顶部按钮
-    - search.suggest       # 搜索建议
-    - search.highlight     # 搜索高亮
-    - content.code.copy    # 代码块一键复制按钮
-
-# 导航栏配置 
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+plugins:
+  - search
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/erwinmsmith/BEAM
 nav:
-  - Home: index.md
-  - Getting Started:
-      - Overview: getting-started/overview.md
+  - Overview: index.md
+  - Start:
+      - Architecture: getting-started/overview.md
       - Installation: getting-started/installation.md
-      - Quick Start: getting-started/quickstart.md
+      - Quick start: getting-started/quickstart.md
       - Configuration: getting-started/config.md
-  - Models:
-      - Strategies: models/strategies.md
-      - BEAM Probability Model: models/beam-theory.md
+  - Algorithms:
+      - Probability model: models/beam-theory.md
+      - Paper to code: models/paper-to-code.md
+      - Strategy interfaces: models/strategies.md
+  - Build:
+      - API reference: api-reference/apireference.md
+      - Offline example: examples/basic-examples.md
+      - Execution example: examples/examples.md
+      - Prompt templates: examples/prompts-examples.md
       - LangChain: models/LangChain.md
       - LangGraph: models/LangGraph.md
-  - API Reference: api-reference/apireference.md
-  - Examples: 
-      - Basic Examples: examples/basic-examples.md
-      - Prompts Examples: examples/prompts-examples.md
-  - Advanced: advanced.md
-  - Common Problems: faq.md
-  - Change Log: changelog.md
-  
-
-# 扩展插件配置
+  - Project:
+      - Engineering: advanced.md
+      - FAQ: faq.md
+      - Changelog: changelog.md
 markdown_extensions:
   - attr_list
   - md_in_html
+  - admonition
+  - tables
+  - toc:
+      permalink: true
   - pymdownx.highlight:
       anchor_linenums: true
-      line_spans: __span
-      pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
   - pymdownx.superfences
-  - pymdownx.tabbed:
-      alternate_style: true
-  - admonition  # 开启警告、提示框
-  - def_list
-  - tables      # 开启表格支持
-  - pymdownx.emoji:
-      emoji_index: !!python/name:material.extensions.emoji.twemoji
-      emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  - pymdownx.caret  # 建议添加，支持下划线等格式
-  - pymdownx.mark   # 建议添加，支持高亮文本
-  - pymdownx.tilde  # 建议添加，支持删除线
+  - pymdownx.snippets:
+      check_paths: true
+validation:
+  links:
+    not_found: warn
+    unrecognized_links: warn
+    anchors: warn

@@ -1,67 +1,29 @@
-# FAQ - Frequently Asked Questions
+# FAQ
 
----
+## Which interface implements the paper's joint model?
 
-## 1. How to fix `asyncio` conflicts in Jupyter Notebook?
+Use `AgentBayesian`, or `TokenOptimizer` with `strategy="bayesian"`. The [paper-to-code map](models/paper-to-code.md) lists the matching equations, algorithms and tests.
 
-**Issue**: Running `loop.run_until_complete` in Notebooks causes `RuntimeError: This event loop is already running`.
-**Cause**: Jupyter already has a running event loop. Standard `asyncio` does not support nested loops by default.
-**Solution**:
-Install and use `nest_asyncio` to allow nested event loops:
+## How do I run the project without an API key?
 
-```python
-import nest_asyncio
-nest_asyncio.apply()
+Run `python -m beam.examples.theory_alignment`. It uses deterministic callbacks on CPU.
 
-# Now you can run BEAM asynchronous methods (like agen) normally
-```
+## What does the completeness coefficient mean?
 
-## 2. How to configure API Keys? (Env Vars vs. Code)
+It is the retained fraction of the observation available to an agent. Supply one coefficient in `[0,1]` per agent using `set_completeness`. Your observation protocol determines the actual input content.
 
-**Option A: Hardcoded in code (Best for quick experiments)**
+## How are reference sampling and deployment related?
 
-Pass the api_key directly into LLMRegistry.get():
+The reference chain targets the utility-tilted feasible graph distribution. Deployment draws candidate graphs and applies deterministic repair and frequency consensus. See the [probability model](models/beam-theory.md) for their respective laws.
 
-```Python
+## Can a sampled graph have no active agents?
 
-llm = LLMRegistry.get(model_name="gpt-4o", api_key="sk-...")
+Yes. The empty graph is feasible, returns no agent answer and has zero calibration accuracy. Isolated active agents also remain valid and execute normally.
 
-```
+## How do I run inside a notebook or asynchronous application?
 
-**Option B: Environment Variables**
+Use `await strategy.atrain(...)` and `await strategy.run(...)`. The `train` and `run_sync` entry points are for synchronous scripts.
 
-Set them in your system terminal or .env file. BEAM automatically scans for these if the parameter is missing:
+## How do I restore a model?
 
-* **OpenAI**: export OPENAI\_API\_KEY='sk-...'  
-* **DeepSeek**: export DEEPSEEK\_API\_KEY='sk-...'
-
----
-
-## 3. How to handle CUDA Out of Memory (OOM) during training?
-
-**Solutions**:
-
-1. **Reduce Batch Size**: Lower the batch\_size in your optimizer configuration to reduce immediate VRAM usage.  
-2. **Decrease Initial Density**: Lower initial\_spatial\_probability in OptimizationConfig to create a sparser initial graph.  
-3. **Gradient Accumulation**: If a large batch is necessary, compute gradients over smaller steps before updating.  
-4. **CPU Execution**: For purely structural/topological optimizations that aren't compute-heavy, set device='cpu'.
-
----
-
-## 4. What if performance drops too much after Pruning?
-
-**Solutions**:
-
-* **Lower Pruning Rate**: Set a smaller pruning\_rate (e.g., 0.05 or 0.1) for a more gradual removal of edges.  
-* **Extend Warm-up Period**: Increase the training rounds before triggering update\_masks to ensure edge weights (logits) have converged correctly.  
-* **Refine Reward Function**: If the reward signal is too sparse (mostly zeros), the algorithm might prune critical paths randomly due to lack of feedback.  
-* **Checkpoint Rollback**: Use strategy.save() to save checkpoints regularly. If accuracy collapses, use strategy.load() to revert to the last stable topology.
-
----
-**Routing Logic**:
-
-BEAM’s LLMRegistry uses keyword-based routing based on the model\_name:
-
-* Contains **gpt** \-\> Routes to OpenAILLM  
-* Contains **deepseek** \-\> Routes to DeepSeekLLM (automatically sets DeepSeek endpoints)  
-* Contains **llama** or **qwen** \-\> Routes to LocalLLM (requires base\_url)
+Construct the same agent graph, call `set_graph`, then `load(path)`. Version-2 checkpoints store the joint model and sampler state. For an older edge-only checkpoint, calibrate the joint model and save a version-2 checkpoint.
