@@ -5,7 +5,7 @@ Provides a flexible, extensible way to define and manage prompts
 for multi-agent systems.
 """
 
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Union
 from dataclasses import dataclass, field
 from string import Template
 import json
@@ -47,8 +47,8 @@ class PromptTemplate:
         ```
     """
     name: str
-    system: str | Callable = ""
-    user: str | Callable = ""
+    system: Union[str, Callable] = ""
+    user: Union[str, Callable] = ""
     description: str = ""
     variables: List[str] = field(default_factory=list)
     
@@ -157,8 +157,8 @@ class PromptSet:
     def add_role(
         self,
         role: str,
-        system: str | Callable = "",
-        user: str | Callable = "",
+        system: Union[str, Callable] = "",
+        user: Union[str, Callable] = "",
         description: str = ""
     ) -> "PromptSet":
         """
@@ -183,8 +183,8 @@ class PromptSet:
     
     def set_decision_template(
         self,
-        system: str | Callable = "",
-        user: str | Callable = ""
+        system: Union[str, Callable] = "",
+        user: Union[str, Callable] = ""
     ) -> "PromptSet":
         """
         Set the decision/aggregation template.
