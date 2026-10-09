@@ -89,10 +89,6 @@ Tests enumerate all 38 feasible three-agent states and verify detailed balance, 
 
 Optional integrations: `python -m pip install -e '.[langchain,langgraph]'`.
 
-## Citation
-
-Use [CITATION.cff](CITATION.cff) for this software release.
-
 ## License
 
 [MIT](LICENSE).
