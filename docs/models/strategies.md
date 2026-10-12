@@ -8,7 +8,7 @@
 
 ## Bayesian graph optimization
 
-`AgentBayesian` combines bounded energy, pairwise GP uncertainty, a KL-regularized graph objective and feasible DAG deployment.
+`AgentBayesian` combines energy dynamics, pairwise GP uncertainty, a regularized task objective and feasible DAG deployment.
 
 ```python
 from beam.examples.bayesian_workflow import build_example

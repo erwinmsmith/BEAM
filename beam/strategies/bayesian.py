@@ -11,10 +11,9 @@ from beam.core.config import BEAMConfig, OptimizationConfig
 from beam.core.graph import AgentGraph
 from beam.core.probability import (
     CoordinateSampler,
-    GraphState,
     SparsePairGP,
     conditioned_samples,
-    covariance_loss,
+    score_loss,
     deployment_state,
     interior_cdf,
     pairs,
@@ -23,13 +22,7 @@ from beam.core.probability import (
 
 
 class AgentBayesian:
-    """Fit the KL-regularized graph objective and deploy repaired graph samples.
-
-    Calibration fixes the structural reference and caches task utility for each
-    state within a batch. GP and energy updates occur between calibration batches.
-    ``sample_reference`` exposes the fixed-target chain from Algorithm 1;
-    ``run`` uses the independent draws and consensus from Algorithm 2.
-    """
+    """Learn Gaussian graph scores with task utility and three regularizers."""
 
     def __init__(self, config: BEAMConfig):
         self.config = config
@@ -49,34 +42,27 @@ class AgentBayesian:
     def _validate_config(self):
         c = self.config.optimization
         positive = [
-            "beta",
-            "energy_min",
-            "energy_max",
+            "energy_initial",
             "energy_dt",
-            "baseline_std",
             "coupling_epsilon",
-            "node_std",
             "gp_length_scale",
             "gp_scale",
-            "gp_observation_variance",
             "gp_jitter",
             "learning_rate",
         ]
         nonnegative = [
-            "communication_cost_weight",
             "energy_gain",
             "energy_cost",
             "uncertainty_scale",
             "node_energy_weight",
+            "nuclear_weight",
+            "variance_weight",
+            "prior_weight",
         ]
         for name in positive + nonnegative:
             value = getattr(c, name)
             if not math.isfinite(value) or value < 0 or (name in positive and value == 0):
                 raise ValueError(f"Invalid {name}")
-        if not c.energy_min < c.energy_max or not c.energy_min <= c.energy_initial <= c.energy_max:
-            raise ValueError(
-                "Require 0 < energy_min <= energy_initial <= energy_max, with distinct bounds"
-            )
         for name in [
             "mcmc_samples",
             "deployment_samples",
@@ -86,36 +72,58 @@ class AgentBayesian:
         ]:
             if not isinstance(getattr(c, name), int) or getattr(c, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if c.mcmc_samples < 2 or not isinstance(c.mcmc_warmup, int) or c.mcmc_warmup < 0:
-            raise ValueError("Require mcmc_samples >= 2 and mcmc_warmup >= 0")
         if not 0 <= c.consensus_threshold <= 1 or not math.isfinite(c.edge_threshold):
             raise ValueError("Invalid graph threshold")
-        if c.node_threshold is not None and not math.isfinite(c.node_threshold):
-            raise ValueError("Node threshold must be finite")
+        for name in ["node_threshold", "candidate_threshold"]:
+            value = getattr(c, name)
+            if value is not None and not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
 
-    def set_graph(self, graph: AgentGraph):
+    def set_graph(self, graph: AgentGraph, embeddings=None):
+        """Register agents and their embedding rows in graph insertion order.
+
+        Omitted embeddings use one-hot agent identities. Supply semantic agent
+        embeddings to share information by role or prompt similarity.
+        """
         n = len(graph.nodes)
         if n < 2 or n != len(graph.agent_names):
             raise ValueError("Register all configured agents (at least two) before set_graph")
-        self.graph, self.n = graph, n
-        self.training_history = []
-        self.observation_history = []
-        self.pairs = pairs(n)
-        self.features = torch.tensor(self.pairs, dtype=torch.float64) / (n - 1)
-        c = self.config.optimization
-        self.gp = SparsePairGP(
-            self.features,
-            c.gp_inducing_points,
-            c.gp_length_scale,
-            c.gp_scale,
-            c.gp_observation_variance,
-            c.gp_jitter,
+        embedding = (
+            torch.eye(n, dtype=torch.float64)
+            if embeddings is None
+            else torch.as_tensor(embeddings, dtype=torch.float64)
         )
+        if (
+            embedding.ndim != 2
+            or embedding.shape[0] != n
+            or embedding.shape[1] < 1
+            or not torch.isfinite(embedding).all()
+        ):
+            raise ValueError("Embeddings must be a finite n by d matrix")
+        self.graph, self.n = graph, n
+        self.embeddings = embedding.detach().clone()
+        self.training_history, self.observation_history = [], []
+        self.pairs = pairs(n)
+        c = self.config.optimization
         self.energy = torch.full((n,), c.energy_initial, dtype=torch.float64)
         self.completeness = torch.ones(n, dtype=torch.float64)
-        self.offsets = torch.nn.Parameter(torch.zeros(n * n, dtype=torch.float64))
-        self.optimizer = torch.optim.Adam([self.offsets], lr=c.learning_rate)
+        self.gp = SparsePairGP(
+            self._pair_features(), c.gp_inducing_points, c.gp_length_scale, c.gp_scale, c.gp_jitter
+        )
+        self.optimizer = torch.optim.Adam(self.gp.parameters(), lr=c.learning_rate)
         self._refresh_scores()
+
+    def _pair_features(self):
+        rows, cols = zip(*self.pairs)
+        return torch.cat(
+            (
+                self.embeddings[list(rows)],
+                self.embeddings[list(cols)],
+                self.energy[list(rows), None],
+                self.energy[list(cols), None],
+            ),
+            dim=1,
+        )
 
     def _require_graph(self):
         if self.graph is None:
@@ -130,103 +138,124 @@ class AgentBayesian:
         self.completeness = values.clone()
         self._refresh_scores()
 
-    def update_energy(self, contributions, costs):
-        """Apply the clipped energy transition (Eq. 3), between fixed-target runs."""
-        self._require_graph()
-        contribution = validate_unit(contributions, "Contributions")
-        cost = validate_unit(costs, "Costs")
-        if contribution.shape != (self.n,) or cost.shape != (self.n,):
-            raise ValueError("Contribution and cost vectors must match the agents")
-        c = self.config.optimization
-        drift = c.energy_gain * contribution - c.energy_cost * cost
-        noise = torch.randn(self.n, dtype=torch.float64, generator=self.generator)
-        updated = (
-            self.energy
-            + drift * c.energy_dt
-            + (
-                c.uncertainty_scale
-                * (1 - self.completeness)
-                * torch.sqrt(self.energy * c.energy_dt)
-                * noise
-            )
-        )
-        self.energy = updated.clamp(c.energy_min, c.energy_max)
-        self._refresh_scores()
-
-    def _refresh_scores(self):
-        c = self.config.optimization
-        mean, variance = self.gp.moments()
+    def coupling(self):
+        """Unnormalized energy communication strengths with zero diagonal."""
         e = self.energy
-        normalizer = c.energy_max**2 / math.sqrt(2 * c.energy_max**2 + c.coupling_epsilon)
-        coupling = (
+        strength = (
             e[:, None]
             * e[None, :]
-            / (normalizer * torch.sqrt(e[:, None] ** 2 + e[None, :] ** 2 + c.coupling_epsilon))
-        )
-        self.edge_means = coupling.clone()
-        self.edge_vars = torch.zeros_like(coupling)
-        for k, (i, j) in enumerate(self.pairs):
-            self.edge_means[i, j] += mean[k]
-            self.edge_vars[i, j] = (
-                variance[k]
-                + c.baseline_std**2
-                + c.uncertainty_scale**2
-                * ((1 - self.completeness[i]) ** 2 + (1 - self.completeness[j]) ** 2)
+            / torch.sqrt(
+                e[:, None].square()
+                + e[None, :].square()
+                + self.config.optimization.coupling_epsilon
             )
-        p = torch.zeros_like(coupling)
-        rows, cols = zip(*self.pairs)
-        p[rows, cols] = interior_cdf(
-            self.edge_means[rows, cols], self.edge_vars[rows, cols], c.edge_threshold
         )
-        node_mean = p.sum(0) + p.sum(1) + c.node_energy_weight * e
-        threshold = self.n - 1 if c.node_threshold is None else c.node_threshold
-        r = interior_cdf(node_mean, torch.full_like(e, c.node_std**2), threshold)
-        self.prior_logits = torch.logit(torch.cat((r, p[rows, cols]))).detach()
+        return strength * (1 - torch.eye(self.n, dtype=e.dtype))
 
-    def probabilities(self, fitted=True):
-        """Node and off-diagonal edge probabilities, in agent insertion order."""
-        self._require_graph()
-        logits = self.prior_logits + self.offsets.detach() if fitted else self.prior_logits
-        eps = torch.finfo(logits.dtype).eps
-        probabilities = logits.sigmoid().clamp(eps, 1 - eps)
-        edges = torch.zeros((self.n, self.n), dtype=torch.float64)
-        rows, cols = zip(*self.pairs)
-        edges[rows, cols] = probabilities[self.n :]
-        return probabilities[: self.n], edges
+    def update_energy(self, contributions, costs=None):
+        """Apply the square-root transition on the positive-energy domain.
 
-    async def sample_reference(self, utility, initial=None, transitions=None, burn_in=None):
-        """Sample pi_beta proportional to p0 exp(beta*u), caching u per state.
-
-        ``utility(state)`` is a deterministic [0,1] callback (sync or async).
-        ``transitions`` counts all transitions; ``burn_in`` counts discarded ones.
-        All structural logits are copied when the chain starts.
+        costs are sums of outgoing communication strengths. An omitted vector
+        uses the full coupling row sums. A nonpositive proposal raises before
+        changing the energy state.
         """
         self._require_graph()
+        contribution = validate_unit(contributions, "Contributions")
+        cost = (
+            self.coupling().sum(1) if costs is None else torch.as_tensor(costs, dtype=torch.float64)
+        )
+        if contribution.shape != (self.n,) or cost.shape != (self.n,):
+            raise ValueError("Contribution and cost vectors must match the agents")
+        if not torch.isfinite(cost).all() or (cost < 0).any():
+            raise ValueError("Communication costs must be finite and nonnegative")
         c = self.config.optimization
-        burn_in = c.mcmc_warmup if burn_in is None else burn_in
-        transitions = burn_in + c.mcmc_samples if transitions is None else transitions
-        sampler = CoordinateSampler(self.prior_logits, self.n, utility, c.beta, self.generator)
-        return await sampler.sample(transitions, burn_in, initial)
+        rng = self.generator.get_state()
+        noise = torch.randn(self.n, dtype=torch.float64, generator=self.generator)
+        updated = self.energy + (c.energy_gain * contribution - c.energy_cost * cost) * c.energy_dt
+        updated += (
+            c.uncertainty_scale
+            * (1 - self.completeness)
+            * torch.sqrt(self.energy * c.energy_dt)
+            * noise
+        )
+        if not torch.isfinite(updated).all() or (updated <= 0).any():
+            self.generator.set_state(rng)
+            raise ValueError(
+                "Energy transition leaves the positive domain; reduce energy_dt or adjust feedback"
+            )
+        self.energy = updated
+        self._refresh_scores()
+
+    def _score_moments(self):
+        mean, variance = self.gp.moments(self._pair_features())
+        rows, cols = zip(*self.pairs)
+        means = torch.zeros((self.n, self.n), dtype=torch.float64)
+        variances = torch.zeros_like(means)
+        means[rows, cols] = mean.sigmoid()
+        variances[rows, cols] = variance
+        return means, variances
+
+    def _probabilities(self, means, variances):
+        c = self.config.optimization
+        rows, cols = zip(*self.pairs)
+        edges = torch.zeros_like(means)
+        edges[rows, cols] = interior_cdf(means[rows, cols], variances[rows, cols], c.edge_threshold)
+        importance = means.sum(0) + means.sum(1) + c.node_energy_weight * self.energy
+        uncertainty = variances.sum(0) + variances.sum(1)
+        threshold = self.n - 1 if c.node_threshold is None else c.node_threshold
+        return interior_cdf(importance, uncertainty, threshold), edges
+
+    def _refresh_scores(self):
+        with torch.no_grad():
+            self.edge_means, self.edge_vars = self._score_moments()
+
+    def probabilities(self):
+        """Gaussian node and edge exceedance probabilities."""
+        self._require_graph()
+        with torch.no_grad():
+            self.edge_means, self.edge_vars = self._score_moments()
+            return self._probabilities(self.edge_means, self.edge_vars)
+
+    def _draw_nodes(self, probabilities):
+        return tuple(
+            (
+                torch.rand(self.n, dtype=torch.float64, generator=self.generator) < probabilities
+            ).tolist()
+        )
+
+    async def sample_reference(self, initial=None, transitions=None, nodes=None):
+        """Draw one node mask and retain every fixed-mask single-edge transition."""
+        self._require_graph()
+        r, p = self.probabilities()
+        if nodes is None:
+            nodes = initial.nodes if initial is not None else self._draw_nodes(r)
+        sampler = CoordinateSampler(p, nodes, self.generator)
+        return await sampler.sample(
+            self.config.optimization.mcmc_samples if transitions is None else transitions, initial
+        )
 
     async def _variational_samples(self):
         c = self.config.optimization
+        r, p = self.probabilities()
+        nodes = self._draw_nodes(r)
         if c.use_mcmc:
-            sampler = CoordinateSampler(
-                self.prior_logits + self.offsets.detach(), self.n, generator=self.generator
-            )
-            return await sampler.sample(c.mcmc_warmup + c.mcmc_samples, c.mcmc_warmup)
-        nodes, edges = self.probabilities()
-        return conditioned_samples(nodes, edges, c.mcmc_samples, self.generator)
+            return await CoordinateSampler(p, nodes, self.generator).sample(c.mcmc_samples)
+        return conditioned_samples(nodes, p, c.mcmc_samples, self.generator)
+
+    def _regularization(self, means, variances):
+        c = self.config.optimization
+        return (
+            c.nuclear_weight * torch.linalg.matrix_norm(means, ord="nuc")
+            + c.variance_weight * variances.sum()
+            + c.prior_weight * self.gp.kl_divergence()
+        )
 
     async def _train_batch(self, batch, eval_fn):
         self._require_graph()
         if not batch:
             raise ValueError("Calibration batches must be nonempty")
-        c = self.config.optimization
-        prior = self.prior_logits.clone()
         states = await self._variational_samples()
-        utilities, accuracies = {}, {}
-        observations = []
+        utilities = {}
         for state in dict.fromkeys(states):
             scores = []
             for record in batch:
@@ -239,59 +268,39 @@ class AgentBayesian:
                 else:
                     score = 0.0
                 scores.append(score)
-            accuracy = sum(scores) / len(scores)
-            cost = sum(sum(row) for row in state.edges) / len(self.pairs)
-            utilities[state] = (
-                accuracy - c.communication_cost_weight * cost + c.communication_cost_weight
-            ) / (1 + c.communication_cost_weight)
-            accuracies[state] = accuracy
-            observations.append(
-                {
-                    "nodes": list(state.nodes),
-                    "active_edges": [i * self.n + j for i, j in self.pairs if state.edges[i][j]],
-                    "reward": accuracy,
-                }
-            )
-        logits = prior + self.offsets
-        loss = covariance_loss(logits, states, [utilities[x] for x in states], prior, c.beta)
+            utilities[state] = sum(scores) / len(scores)
+        means, variances = self._score_moments()
+        r, p = self._probabilities(means, variances)
+        penalty = self._regularization(means, variances)
+        loss = score_loss(r, p, states, [utilities[x] for x in states]) + penalty
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        if not torch.isfinite(self.offsets).all():
-            raise RuntimeError("Non-finite fitted graph logits")
-        self.observation_history.extend(observations)
-        self._fit_gp()
-        # Contribution and cost feedback use the same retained calibration states.
+        if any(not torch.isfinite(param).all() for param in self.gp.parameters()):
+            raise RuntimeError("Non-finite GP variational parameters")
+        self.observation_history.extend(
+            {
+                "nodes": list(x.nodes),
+                "active_edges": [i * self.n + j for i, j in self.pairs if x.edges[i][j]],
+                "reward": utilities[x],
+            }
+            for x in utilities
+        )
         contributions = torch.tensor(
-            [[accuracies[x] * bit for bit in x.nodes] for x in states], dtype=torch.float64
+            [[utilities[x] * bit for bit in x.nodes] for x in states], dtype=torch.float64
         ).mean(0)
-        costs = torch.tensor(
-            [[sum(row) / (self.n - 1) for row in x.edges] for x in states], dtype=torch.float64
-        ).mean(0)
+        adjacency = torch.tensor([x.edges for x in states], dtype=torch.float64).mean(0)
+        costs = (adjacency * self.coupling()).sum(1)
         self.update_energy(contributions, costs)
+        accuracy = sum(utilities[x] for x in states) / len(states)
         return {
             "loss": float(loss.detach()),
-            "accuracy": sum(accuracies[x] for x in states) / len(states),
-            "utility": sum(utilities[x] for x in states) / len(states),
-            "solved": sum(accuracies.values()) * len(batch),
+            "accuracy": accuracy,
+            "utility": accuracy,
+            "objective": accuracy - float(penalty.detach()),
+            "solved": sum(utilities.values()) * len(batch),
             "executed": len(utilities) * len(batch),
         }
-
-    def _fit_gp(self):
-        # Sufficient statistics per pair keep inducing updates independent of history length.
-        sums = torch.zeros(len(self.pairs), dtype=torch.float64)
-        counts = torch.zeros_like(sums)
-        index = {i * self.n + j: k for k, (i, j) in enumerate(self.pairs)}
-        for observation in self.observation_history:
-            for edge in observation["active_edges"]:
-                k = index[edge]
-                sums[k] += observation["reward"]
-                counts[k] += 1
-        observed = counts > 0
-        if observed.any():
-            # One empirical contribution score per ordered pair is the GP observation.
-            self.gp.fit(self.features[observed], sums[observed] / counts[observed])
-        self._refresh_scores()
 
     def train(self, train_data, eval_fn, num_iterations=None, batch_size=None, verbose=True):
         """Synchronous calibration; async applications can await ``atrain``."""
@@ -318,6 +327,7 @@ class AgentBayesian:
             "losses": [],
             "accuracies": [],
             "utilities": [],
+            "objectives": [],
             "edge_uncertainty": [],
         }
         for iteration in range(iterations):
@@ -328,6 +338,7 @@ class AgentBayesian:
                 stats["losses"].append(result["loss"])
                 stats["accuracies"].append(result["accuracy"])
                 stats["utilities"].append(result["utility"])
+                stats["objectives"].append(result["objective"])
                 rows, cols = zip(*self.pairs)
                 stats["edge_uncertainty"].append(float(self.edge_vars[rows, cols].mean()))
                 if verbose:
@@ -341,19 +352,25 @@ class AgentBayesian:
         """Deploy Algorithm 2; use_mean=True aggregates deployment_samples draws."""
         self._require_graph()
         c = self.config.optimization
-        node_probs, edge_probs = self.probabilities()
+        node_probs, _ = self.probabilities()
+        nodes = self._draw_nodes(node_probs)
+        candidates = self.graph.fixed_spatial_masks.bool().clone()
+        if c.candidate_threshold is not None:
+            candidates &= self.edge_means > c.candidate_threshold
         state = deployment_state(
-            node_probs,
-            edge_probs,
-            self.graph.fixed_spatial_masks,
+            nodes,
+            self.edge_means,
+            self.edge_vars,
+            candidates,
             c.deployment_samples if use_mean else 1,
             c.consensus_threshold,
+            c.edge_threshold,
             self.generator,
         )
         answers, _ = await self.graph.arun_state(inputs, state, num_rounds)
         metadata = {
             "strategy": "bayesian",
-            "sampling": "independent-repair-consensus",
+            "sampling": "gaussian-repair-consensus",
             "active_nodes": sum(state.nodes),
             "active_edges": sum(map(sum, state.edges)),
             "node_mask": list(state.nodes),
@@ -391,14 +408,14 @@ class AgentBayesian:
         optimization["strategy"] = getattr(strategy, "value", strategy)
         torch.save(
             {
-                "version": 2,
+                "version": 3,
                 "n": self.n,
                 "optimization": optimization,
-                "offsets": self.offsets.detach(),
+                "agent_ids": list(self.graph.nodes),
+                "embeddings": self.embeddings,
                 "energy": self.energy,
                 "completeness": self.completeness,
-                "gp_mean": self.gp.mean,
-                "gp_covariance": self.gp.covariance,
+                "gp": self.gp.state_dict(),
                 "rng": self.generator.get_state(),
                 "optimizer": self.optimizer.state_dict(),
                 "training_history": self.training_history,
@@ -410,53 +427,44 @@ class AgentBayesian:
     def load(self, path):
         self._require_graph()
         state = torch.load(path, map_location="cpu", weights_only=True)
-        if state.get("version") != 2 or state["n"] != self.n:
+        if state.get("version") != 3 or state["n"] != self.n:
             raise ValueError(
-                "Expected a version-2 joint node/edge checkpoint with matching agent count"
+                "Expected a version-3 variational GP checkpoint with matching agent count"
             )
-        config = OptimizationConfig(**state["optimization"])
-        old_config = self.config.optimization
-        self.config.optimization = config
-        try:
-            self._validate_config()
-        except (ValueError, TypeError):
-            self.config.optimization = old_config
-            raise
-        self.set_graph(self.graph)
+        if state["agent_ids"] != list(self.graph.nodes):
+            raise ValueError("Checkpoint agent order must match the registered graph")
         for name in ["energy", "completeness"]:
             value = state[name]
             if value.shape != (self.n,) or not torch.isfinite(value).all():
                 raise ValueError(f"Invalid checkpoint {name}")
         validate_unit(state["completeness"], "Checkpoint completeness")
-        if ((state["energy"] < config.energy_min) | (state["energy"] > config.energy_max)).any():
-            raise ValueError("Checkpoint energies are outside configured bounds")
-        if (
-            state["offsets"].shape != self.offsets.shape
-            or not torch.isfinite(state["offsets"]).all()
-        ):
-            raise ValueError("Invalid checkpoint logits")
-        if (
-            state["gp_mean"].shape != self.gp.mean.shape
-            or state["gp_covariance"].shape != self.gp.covariance.shape
-        ):
-            raise ValueError("Invalid checkpoint GP dimensions")
-        if (
-            not torch.isfinite(state["gp_mean"]).all()
-            or not torch.isfinite(state["gp_covariance"]).all()
-        ):
-            raise ValueError("Invalid checkpoint GP moments")
-        covariance = state["gp_covariance"]
-        if (
-            not torch.allclose(covariance, covariance.T)
-            or torch.linalg.eigvalsh(covariance).min() < -1e-10
-        ):
-            raise ValueError("Checkpoint GP covariance must be positive semidefinite")
-        with torch.no_grad():
-            self.offsets.copy_(state["offsets"])
-        self.energy, self.completeness = state["energy"], state["completeness"]
-        self.gp.mean, self.gp.covariance = state["gp_mean"], state["gp_covariance"]
-        self.generator.set_state(state["rng"])
-        self.optimizer.load_state_dict(state["optimizer"])
-        self.observation_history = state["observation_history"]
-        self.training_history = state["training_history"]
-        self._refresh_scores()
+        if (state["energy"] <= 0).any():
+            raise ValueError("Checkpoint energies must be positive")
+        config = BEAMConfig(optimization=OptimizationConfig(**state["optimization"]))
+        restored = AgentBayesian(config)
+        restored.set_graph(self.graph, state["embeddings"])
+        restored.gp.load_state_dict(state["gp"])
+        if any(not torch.isfinite(x).all() for x in restored.gp.state_dict().values()):
+            raise ValueError("Checkpoint GP tensors must be finite")
+        restored.energy, restored.completeness = state["energy"], state["completeness"]
+        restored.generator.set_state(state["rng"])
+        restored.optimizer.load_state_dict(state["optimizer"])
+        restored.training_history, restored.observation_history = (
+            state["training_history"],
+            state["observation_history"],
+        )
+        restored._refresh_scores()
+        self.config.optimization = config.optimization
+        for name in [
+            "embeddings",
+            "energy",
+            "completeness",
+            "gp",
+            "generator",
+            "optimizer",
+            "training_history",
+            "observation_history",
+            "edge_means",
+            "edge_vars",
+        ]:
+            setattr(self, name, getattr(restored, name))

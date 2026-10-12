@@ -1,7 +1,6 @@
 """Finite node/edge states, sparse GP moments, and BEAM graph distributions."""
 
 from dataclasses import dataclass
-import inspect
 import math
 from typing import Tuple
 
@@ -92,105 +91,111 @@ def interior_cdf(mean, variance, threshold):
     return probability.clamp(eps, 1 - eps)
 
 
-def bernoulli_log_mass(logits, state):
-    """Unnormalized constrained mass: includes every inactive node/edge factor."""
-    bits = state.bits().to(logits)
-    if logits.shape != bits.shape:
-        raise ValueError("Expected n^2 logits (nodes, then off-diagonal edges)")
-    return (bits * logits - torch.nn.functional.softplus(logits)).sum()
+def conditional_log_mass(edge_logits, state):
+    """Bernoulli edge mass on active ordered pairs, before DAG normalization."""
+    n = len(state.nodes)
+    if edge_logits.shape != (n, n):
+        raise ValueError("Expected an n by n edge-logit matrix")
+    active = [(i, j) for i, j in pairs(n) if state.nodes[i] and state.nodes[j]]
+    if not active:
+        return edge_logits.sum() * 0
+    rows, cols = zip(*active)
+    eta = edge_logits[rows, cols]
+    bits = torch.tensor([state.edges[i][j] for i, j in active], dtype=eta.dtype)
+    return (bits * eta - torch.nn.functional.softplus(eta)).sum()
 
 
-def covariance_loss(logits, states, utilities, prior_logits, beta):
-    """Negative empirical covariance gradient of E_q[u] - KL(q || p0)/beta."""
-    if len(states) < 2:
-        raise ValueError("At least two retained states are needed for graph fitting")
-    log_q = torch.stack([bernoulli_log_mass(logits, x) for x in states])
-    log_p = torch.stack([bernoulli_log_mass(prior_logits, x) for x in states])
-    reward = torch.as_tensor(utilities, dtype=logits.dtype, device=logits.device)
-    # DAG normalizers are state-independent and cancel under centering.
-    weights = (reward - (log_q - log_p) / beta).detach()
-    return -((weights - weights.mean()) * log_q).mean()
+def score_loss(node_probs, edge_probs, states, utilities):
+    """Negative node score plus the within-mask centered edge-score estimate."""
+    if not states or any(x.nodes != states[0].nodes for x in states):
+        raise ValueError("Retained states must share one fixed node mask")
+    reward = validate_unit(utilities, "Task utilities").to(node_probs)
+    if reward.shape != (len(states),):
+        raise ValueError("One utility per retained state is required")
+    z = torch.tensor(states[0].nodes, dtype=node_probs.dtype)
+    node_log = (z * node_probs.log() + (1 - z) * torch.log1p(-node_probs)).sum()
+    # The diagonal is excluded from the mass; give it a finite logit.
+    safe = edge_probs + torch.eye(len(node_probs), dtype=edge_probs.dtype) * 0.5
+    logs = torch.stack([conditional_log_mass(torch.logit(safe), x) for x in states])
+    return -(
+        reward.mean().detach() * node_log
+        + ((reward - reward.mean()).detach() * (logs - logs.mean())).mean()
+    )
 
 
 class CoordinateSampler:
-    """Algorithm 1: lazy, symmetric, single-bit MH with a frozen utility cache."""
+    """Fixed-node, uniformly proposed single-edge Metropolis--Hastings chain."""
 
-    def __init__(self, logits, n, utility=None, beta=1.0, generator=None):
-        self.logits = torch.as_tensor(logits, dtype=torch.float64).detach().clone()
-        if self.logits.shape != (n * n,) or not torch.isfinite(self.logits).all():
-            raise ValueError("Expected n^2 finite logits")
-        if n < 2 or not math.isfinite(beta) or beta <= 0:
-            raise ValueError("n >= 2 and finite beta > 0 are required")
-        self.n, self.beta, self.utility = n, beta, utility
+    def __init__(self, edge_probs, nodes, generator=None):
+        self.nodes = GraphState(tuple(nodes), ((False,) * len(nodes),) * len(nodes)).nodes
+        self.n = len(self.nodes)
+        probabilities = validate_unit(edge_probs, "Edge probabilities")
+        if self.n < 2 or probabilities.shape != (self.n, self.n):
+            raise ValueError("Expected n >= 2 nodes and an n by n probability matrix")
+        self.active = [(i, j) for i, j in pairs(self.n) if self.nodes[i] and self.nodes[j]]
+        if any(not 0 < float(probabilities[i, j]) < 1 for i, j in self.active):
+            raise ValueError("Active-pair probabilities must be strictly between zero and one")
+        safe = probabilities.clone()
+        safe.fill_diagonal_(0.5)
+        self.logits = torch.logit(safe).detach().clone()
         self.generator = generator
-        self.utilities = {}
-
-    async def value(self, state):
-        if state not in self.utilities:
-            value = 0.0 if self.utility is None else self.utility(state)
-            if inspect.isawaitable(value):
-                value = await value
-            value = float(value)
-            if not math.isfinite(value) or not 0 <= value <= 1:
-                raise ValueError("The fixed utility must lie in [0, 1]")
-            self.utilities[state] = value
-        return self.utilities[state]
 
     async def log_acceptance(self, state, proposal):
-        if not state.feasible() or len(state.nodes) != self.n:
-            raise ValueError("The current state must be feasible")
-        if len(proposal.nodes) != self.n or not proposal.feasible():
+        if state.nodes != self.nodes or not state.feasible():
+            raise ValueError("The current state must be a DAG on the fixed node mask")
+        if proposal.nodes != self.nodes or not proposal.feasible():
             return -math.inf
-        if int((state.bits() != proposal.bits()).sum()) != 1:
+        changed = [(i, j) for i, j in pairs(self.n) if state.edges[i][j] != proposal.edges[i][j]]
+        if len(changed) != 1 or changed[0] not in self.active:
             return -math.inf
-        difference = bernoulli_log_mass(self.logits, proposal) - bernoulli_log_mass(
-            self.logits, state
-        )
-        difference = float(difference) + self.beta * (
-            await self.value(proposal) - await self.value(state)
-        )
-        return min(0.0, difference)
+        i, j = changed[0]
+        return min(0.0, float(self.logits[i, j]) * (1 if proposal.edges[i][j] else -1))
 
-    async def sample(self, transitions, burn_in=0, initial=None):
-        if not isinstance(transitions, int) or not isinstance(burn_in, int):
-            raise ValueError("Transition and burn-in counts must be integers")
-        if not 0 <= burn_in < transitions:
-            raise ValueError("Require 0 <= burn_in < transitions")
-        state = GraphState.empty(self.n) if initial is None else initial
-        if len(state.nodes) != self.n or not state.feasible():
-            raise ValueError("Initial state must be feasible and match n")
+    async def sample(self, transitions, initial=None):
+        if not isinstance(transitions, int) or transitions < 1:
+            raise ValueError("Transition count must be a positive integer")
+        state = (
+            GraphState(self.nodes, ((False,) * self.n,) * self.n) if initial is None else initial
+        )
+        if state.nodes != self.nodes or not state.feasible():
+            raise ValueError("Initial graph must be a DAG on the fixed node mask")
         retained = []
-        for step in range(transitions):
-            if torch.rand((), generator=self.generator).item() < 0.5:
-                coordinate = int(torch.randint(self.n**2, (), generator=self.generator))
-                proposal = state.flip(coordinate)
+        for _ in range(transitions):
+            if self.active:
+                i, j = self.active[
+                    int(torch.randint(len(self.active), (), generator=self.generator))
+                ]
+                proposal = state.flip(self.n + pairs(self.n).index((i, j)))
                 log_accept = await self.log_acceptance(state, proposal)
                 uniform = torch.rand((), dtype=torch.float64, generator=self.generator).item()
-                if (math.log(uniform) if uniform > 0 else -math.inf) < log_accept:
+                if (math.log(uniform) if uniform else -math.inf) < log_accept:
                     state = proposal
-            if step >= burn_in:
-                retained.append(state)
+            retained.append(state)
         return retained
 
 
-def independent_state(node_probs, edge_probs, generator=None):
-    n = len(node_probs)
-    z = torch.rand(n, dtype=torch.float64, generator=generator) < node_probs
-    a = torch.rand((n, n), dtype=torch.float64, generator=generator) < edge_probs
-    a.fill_diagonal_(False)
-    return GraphState(tuple(z.tolist()), tuple(tuple(row) for row in a.tolist()))
-
-
-def conditioned_samples(node_probs, edge_probs, count, generator=None, max_attempts=100000):
-    """Independent draws from q conditioned on feasibility, by rejection."""
+def conditioned_samples(nodes, edge_probs, count, generator=None, max_attempts=100000):
+    """Independent DAG-conditioned edge draws with the node mask held fixed."""
+    if not isinstance(count, int) or count < 1:
+        raise ValueError("Sample count must be positive")
+    nodes = GraphState(tuple(nodes), ((False,) * len(nodes),) * len(nodes)).nodes
+    n = len(nodes)
+    probabilities = validate_unit(edge_probs, "Edge probabilities")
+    if n < 2 or probabilities.shape != (n, n):
+        raise ValueError("Node and edge dimensions must agree")
+    endpoint = torch.tensor(nodes)[:, None] & torch.tensor(nodes)[None, :]
     retained = []
     for _ in range(max_attempts):
-        state = independent_state(node_probs, edge_probs, generator)
+        edges = (
+            torch.rand((n, n), dtype=torch.float64, generator=generator) < probabilities
+        ) & endpoint
+        edges.fill_diagonal_(False)
+        state = GraphState(nodes, tuple(tuple(row) for row in edges.tolist()))
         if state.feasible():
             retained.append(state)
             if len(retained) == count:
                 return retained
-    raise RuntimeError("DAG rejection budget exhausted; use_mcmc=True enables coordinate sampling")
+    raise RuntimeError("DAG rejection budget exhausted; use_mcmc=True enables edge sampling")
 
 
 def repair_state(state, scores):
@@ -236,73 +241,99 @@ def repair_state(state, scores):
     return GraphState(state.nodes, tuple(tuple(row) for row in a))
 
 
-def deployment_state(node_probs, edge_probs, candidates, count, threshold, generator=None):
-    """Algorithm 2: independent draws, deterministic repair, and strict consensus."""
-    node_probs = validate_unit(node_probs, "Node probabilities")
-    edge_probs = validate_unit(edge_probs, "Edge probabilities")
-    n = len(node_probs)
+def deployment_state(
+    nodes, means, variances, candidates, count, threshold, edge_threshold=0.5, generator=None
+):
+    """Gaussian edge draws, smallest-mean cycle repair, strict frequency consensus."""
+    nodes = GraphState(tuple(nodes), ((False,) * len(nodes),) * len(nodes)).nodes
+    n = len(nodes)
+    means = torch.as_tensor(means, dtype=torch.float64)
+    variances = torch.as_tensor(variances, dtype=torch.float64)
     candidates = torch.as_tensor(candidates, dtype=torch.bool).clone()
-    if n < 2 or edge_probs.shape != (n, n) or candidates.shape != (n, n):
+    if n < 2 or any(x.shape != (n, n) for x in [means, variances, candidates]):
         raise ValueError("Deployment dimensions must agree, with n >= 2")
     if not isinstance(count, int) or count < 1 or not 0 <= threshold <= 1:
         raise ValueError("Require sample count >= 1 and consensus threshold in [0, 1]")
+    if (
+        not torch.isfinite(means).all()
+        or not torch.isfinite(variances).all()
+        or (variances < 0).any()
+    ):
+        raise ValueError("Gaussian moments must be finite with nonnegative variances")
+    if not math.isfinite(edge_threshold):
+        raise ValueError("Edge threshold must be finite")
     candidates.fill_diagonal_(False)
+    candidates &= torch.tensor(nodes)[:, None] & torch.tensor(nodes)[None, :]
     samples = []
     for _ in range(count):
-        raw = independent_state(node_probs, edge_probs * candidates, generator)
-        samples.append(repair_state(raw, edge_probs))
+        draws = means + variances.sqrt() * torch.randn(
+            (n, n), dtype=torch.float64, generator=generator
+        )
+        edges = (draws > edge_threshold) & candidates
+        raw = GraphState(nodes, tuple(tuple(row) for row in edges.tolist()))
+        samples.append(repair_state(raw, means))
     if count == 1:
         return samples[0]
-    nodes = tuple(any(x.nodes[i] for x in samples) for i in range(n))
     frequencies = torch.tensor([x.edges for x in samples], dtype=torch.float64).mean(0)
     edges = (frequencies > threshold) & candidates
     state = GraphState(nodes, tuple(tuple(row) for row in edges.tolist()))
     return repair_state(state, frequencies)
 
 
-class SparsePairGP:
-    """RBF inducing-variable GP with q(f,v)=p(f|v)q(v), Gaussian observations."""
+class SparsePairGP(torch.nn.Module):
+    """RBF inducing GP with trainable whitened Gaussian variational parameters."""
 
-    def __init__(
-        self, inputs, inducing_count=10, length_scale=1.0, scale=1.0, noise=0.1, jitter=1e-6
-    ):
-        self.inputs = torch.as_tensor(inputs, dtype=torch.float64).clone()
-        if self.inputs.ndim != 2 or not len(self.inputs) or not torch.isfinite(self.inputs).all():
+    def __init__(self, inputs, inducing_count=10, length_scale=1.0, scale=1.0, jitter=1e-6):
+        super().__init__()
+        inputs = torch.as_tensor(inputs, dtype=torch.float64).detach().clone()
+        if inputs.ndim != 2 or not len(inputs) or not torch.isfinite(inputs).all():
             raise ValueError("Pair features must be a nonempty finite matrix")
         if not isinstance(inducing_count, int) or inducing_count < 1:
             raise ValueError("Inducing count must be positive")
-        if any(not math.isfinite(v) or v <= 0 for v in [length_scale, scale, noise, jitter]):
-            raise ValueError("GP scales, observation variance and jitter must be positive")
-        self.length_scale, self.scale, self.noise = length_scale, scale, noise
+        if any(not math.isfinite(v) or v <= 0 for v in [length_scale, scale, jitter]):
+            raise ValueError("GP scales and jitter must be positive")
+        self.length_scale, self.scale = length_scale, scale
         indices = torch.linspace(0, len(inputs) - 1, min(inducing_count, len(inputs))).long()
-        self.inducing = self.inputs[indices]
-        self.kzz = self.kernel(self.inducing, self.inducing) + jitter * torch.eye(
+        self.register_buffer("inputs", inputs)
+        self.register_buffer("inducing", inputs[indices].clone())
+        kzz = self.kernel(self.inducing, self.inducing) + jitter * torch.eye(
             len(indices), dtype=torch.float64
         )
-        self.factor = torch.linalg.cholesky(self.kzz)
-        self.mean = torch.zeros(len(indices), dtype=torch.float64)
-        self.covariance = self.kzz.clone()
+        self.register_buffer("kzz", kzz)
+        self.register_buffer("factor", torch.linalg.cholesky(kzz))
+        self.location = torch.nn.Parameter(torch.zeros(len(indices), dtype=torch.float64))
+        self.raw_cholesky = torch.nn.Parameter(torch.zeros_like(kzz))
+
+    @property
+    def cholesky(self):
+        return self.raw_cholesky.tril(-1) + torch.diag(self.raw_cholesky.diag().exp())
+
+    @property
+    def mean(self):
+        return self.factor @ self.location
+
+    @property
+    def covariance(self):
+        factor = self.factor @ self.cholesky
+        return factor @ factor.T
 
     def kernel(self, x, y):
         distances = torch.cdist(x / self.length_scale, y / self.length_scale).square()
         return self.scale**2 * torch.exp(-0.5 * distances)
 
-    def fit(self, inputs, targets):
-        x = torch.as_tensor(inputs, dtype=torch.float64)
-        y = torch.as_tensor(targets, dtype=torch.float64)
-        if x.ndim != 2 or x.shape[1] != self.inputs.shape[1] or y.shape != (len(x),):
-            raise ValueError("GP training features and targets must have matching dimensions")
-        if not torch.isfinite(x).all() or not torch.isfinite(y).all():
-            raise ValueError("GP observations must be finite")
-        kzx = self.kernel(self.inducing, x)
-        a = self.kzz + kzx @ kzx.T / self.noise
-        factor = torch.linalg.cholesky(a)
-        self.mean = self.kzz @ torch.cholesky_solve((kzx @ y / self.noise)[:, None], factor)[:, 0]
-        self.covariance = self.kzz @ torch.cholesky_solve(self.kzz, factor)
+    def moments(self, inputs=None):
+        x = self.inputs if inputs is None else inputs
+        kxz = self.kernel(x, self.inducing)
+        projection = torch.linalg.solve_triangular(self.factor, kxz.T, upper=False).T
+        conditional = self.scale**2 - projection.square().sum(1)
+        variance = conditional + (projection @ self.cholesky).square().sum(1)
+        return projection @ self.location, variance.clamp_min(torch.finfo(x.dtype).eps)
 
-    def moments(self):
-        kxz = self.kernel(self.inputs, self.inducing)
-        b = torch.cholesky_solve(kxz.T, self.factor).T
-        conditional = self.scale**2 - (b * kxz).sum(1)
-        variance = conditional + ((b @ self.covariance) * b).sum(1)
-        return b @ self.mean, variance.clamp_min(0)
+    def kl_divergence(self):
+        chol = self.cholesky
+        return 0.5 * (
+            chol.square().sum()
+            + self.location.square().sum()
+            - len(self.location)
+            - 2 * self.raw_cholesky.diag().sum()
+        )

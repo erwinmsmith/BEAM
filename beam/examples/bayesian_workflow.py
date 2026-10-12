@@ -15,10 +15,9 @@ def build_example():
         optimization=OptimizationConfig(
             strategy="bayesian",
             use_mcmc=True,
-            mcmc_samples=200,
-            mcmc_warmup=50,
+            mcmc_samples=10,
             deployment_samples=10,
-            beta=2.0,
+            node_threshold=0.0,
             random_seed=7,
         ),
     )
@@ -41,13 +40,7 @@ async def main():
         verbose=False,
     )
 
-    # A deterministic graph utility makes the reference target fully specified.
-    def utility(state):
-        accuracy = float(any(state.nodes))
-        cost = sum(map(sum, state.edges)) / 6
-        return (accuracy - 0.1 * cost + 0.1) / 1.1
-
-    samples = await strategy.sample_reference(utility)
+    samples = await strategy.sample_reference()
     answers, metadata = await strategy.run({"task": "What is 2 + 2?"})
     print("Calibration accuracy:", stats["accuracies"][-1])
     print("Feasible reference samples:", len(samples))

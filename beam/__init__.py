@@ -21,7 +21,7 @@ from beam.core.probability import GraphState
 from beam.strategies import AgentPrune, AgentDropout, AgentBayesian
 from beam.prompts import PromptRegistry, PromptTemplate, PromptSet
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     # Config
     "BEAMConfig",

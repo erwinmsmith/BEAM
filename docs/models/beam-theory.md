@@ -1,105 +1,97 @@
-# BEAM probability model and implementation
+# BEAM probability model
 
-BEAM jointly chooses participating agents and directed communication edges. A positive energy proxy integrates contribution and communication cost. Pairwise Gaussian-process moments express interaction uncertainty; calibration learns a graph distribution, and deployment constructs an executable DAG.
+BEAM learns agent participation and directed communication jointly. Energy reflects task contribution and communication cost. A sparse variational Gaussian process shares information across agent pairs, while Gaussian score uncertainty controls node and edge selection.
 
-## State and probabilities
+## Energy and observations
 
-`GraphState(nodes, edges)` represents `x = (z, A)` in the insertion order of `graph.nodes`. The diagonal of `A` is zero, every edge has active endpoints, and `A` is acyclic. Isolated active agents remain part of the state. The empty state returns no agent answer and receives zero calibration accuracy.
-
-For `n` agents, the reference distribution uses `n²` bits: first `n` node bits, then `n(n−1)` ordered off-diagonal edge bits. `bernoulli_log_mass` includes both present and absent bits. Conditioning this mass on feasible states defines `p0`; neither MH nor the covariance gradient needs its normalizer.
-
-The energy update is
+`set_completeness(alpha)` sets each agent's retained-information fraction in `[0,1]`. The task's observation protocol supplies the corresponding masked inputs. Energy evolves between calibration batches:
 
 ```text
-E_i(next) = clip(E_i + (energy_gain * contribution_i - energy_cost * cost_i) * dt
-                    + uncertainty_scale * (1-alpha_i) * sqrt(E_i * dt) * Normal(0,1),
-                energy_min, energy_max)
+w_ij = E_i E_j / sqrt(E_i² + E_j² + coupling_epsilon)
+E_i(next) = E_i + (energy_gain * contribution_i - energy_cost * cost_i) * dt
+                  + uncertainty_scale * (1-alpha_i) * sqrt(E_i * dt) * Normal(0,1)
 ```
 
-`set_completeness(alpha)` sets the observed retained fraction, with `0 <= alpha_i <= 1`. The caller supplies observations produced by its masking or observation protocol. `update_energy(contributions, costs)` accepts per-agent scores in `[0,1]`; the built-in calibration uses accuracy-weighted participation and normalized outgoing degree. Energy updates occur between calibration batches.
+The diagonal coupling is zero. `update_energy(contributions, costs=None)` takes contributions in `[0,1]` and nonnegative outgoing-strength sums. Omitting costs uses the full coupling row sums. During training, contributions are accuracy-weighted participation and costs are coupling strengths weighted by the retained adjacency frequency. An energy proposal outside the positive domain raises a `ValueError` before changing energies or consuming the noise draw; callers can reduce `energy_dt` and retry with the same feedback.
 
-For off-diagonal pairs:
+The conditional energy noise variance is `uncertainty_scale² * (1-alpha_i)² * E_i * dt`. The GP supplies the learned edge-score variance. These quantities enter their respective energy and score models.
 
-```text
-m_ij = normalized_coupling(E_i, E_j) + GP_mean_ij
-s_ij² = GP_variance_ij + baseline_std²
-        + uncertainty_scale² * ((1-alpha_i)² + (1-alpha_j)²)
-p_ij = Phi((m_ij - edge_threshold) / s_ij)
-r_i  = Phi((sum_j(p_ij + p_ji) + node_energy_weight * E_i - node_threshold) / node_std)
-```
+## Sparse variational GP
 
-`node_threshold` defaults to `n−1`. Gaussian probabilities are clipped only at machine-epsilon endpoints to retain positive finite masses. Learned logit offsets parameterize the variational family relative to this structural reference.
+`set_graph(graph, embeddings=None)` accepts an `n × d` matrix of agent embeddings in registration order. The default is a one-hot identity embedding; callers can supply embeddings of roles or prompts. Each pair input is `(embedding_i, embedding_j, E_i, E_j)`. Energy updates change the query inputs; inducing inputs stay fixed at their initialized locations.
 
-## Pairwise GP
-
-`SparsePairGP` uses the ordered features `(i/(n−1), j/(n−1))`, an RBF kernel and a deterministic subset of inducing inputs. Its variational joint is `q(f,v) = p(f|v) q(v)` with Gaussian `q(v)`. Prediction retains the conditional covariance:
+The RBF GP uses `q(f,u)=p(f|u)q(u)`, with `q(u)=Normal(m,S)`:
 
 ```text
 B = K_XZ K_ZZ^(-1)
-mean = B m
-covariance = K_XX - B K_ZX + B S B^T
+mean_f = B m
+cov_f = K_XX - B K_ZX + B S B^T
+mu_ij = sigmoid(mean_f_ij)
+sigma_ij² = diag(cov_f)_ij
 ```
 
-Cholesky solves implement the matrix operations. Before observations, `m=0` and `S=K_ZZ`, so the full prior variance is recovered even with fewer inducing inputs than pair inputs. Calibration forms one empirical contribution score per observed pair by averaging its active-state rewards. A Gaussian observation model gives closed-form inducing mean and covariance updates. GP configuration controls the kernel length scale, amplitude, observation variance, inducing count and diagonal jitter.
-
-## Fixed-target reference chain
-
-`await strategy.sample_reference(utility)` samples the target
+Cholesky solves retain the conditional covariance. The trainable Gaussian uses whitened coordinates `u=L v`, where `K_ZZ=L L^T` and `q(v)=Normal(a,C C^T)`. Exponentiated Cholesky diagonals keep `S` positive definite. The inducing penalty is
 
 ```text
-pi_beta(x) proportional to p0(x) * exp(beta * utility(x)).
+KL(q(u)||p(u)) = (||C||_F² + ||a||² - m - 2 sum(log(diag(C)))) / 2.
 ```
 
-The callback must specify a fixed deterministic utility in `[0,1]`, and can be synchronous or asynchronous. The sampler copies all logits at chain creation and memoizes each state's utility. Each transition stays put with probability `1/2`; otherwise it uniformly chooses one of the `n²` coordinates and flips that bit. Infeasible proposals are rejected. For a feasible neighbor `y`, the log acceptance threshold is
+Initialization uses `a=0, C=I`, giving score means `0.5` and variance `gp_scale²` (default `1.0`). Adam updates both variational mean and covariance from task feedback and the regularizers.
+
+## Node and edge probabilities
 
 ```text
-min(0, log_base_mass(y) - log_base_mass(x) + beta * (utility(y)-utility(x))).
+p_ij = Phi((mu_ij - edge_threshold) / sigma_ij)
+rho_i = sum_j(mu_ij + mu_ji) + node_energy_weight * E_i
+s_i² = sum_j(sigma_ij² + sigma_ji²)
+r_i = Phi((rho_i - node_threshold) / s_i)
 ```
 
-Node deactivation with incident edges is rejected as a single-bit proposal. No edges are silently deleted by the reference sampler. Self-transitions are retained. `transitions` includes burn-in; the returned length is `transitions - burn_in`. The configuration defaults use `mcmc_warmup + mcmc_samples` transitions to retain exactly `mcmc_samples` states.
-
-## KL-regularized calibration
-
-`train` / `atrain` fit `F_beta(q) = E_q[u] - KL(q || p0)/beta`. The built-in fixed-batch utility is
+All sums exclude the diagonal. `node_threshold=None` selects `n-1`. Gaussian probabilities use machine-epsilon interior endpoints. Sample the node mask `z` once per batch. On its active ordered pairs, define
 
 ```text
-u(x) = (accuracy(x) - lambda * edge_density(x) + lambda) / (1+lambda),
-edge_density(x) = sum(A_ij) / (n*(n-1)).
+h(A|z) = product p_ij^A_ij (1-p_ij)^(1-A_ij)
+pi(A|z) = 1{A is a DAG} h(A|z) / Z(z)
+P(z,A) = product r_i^z_i (1-r_i)^(1-z_i) * pi(A|z).
 ```
 
-`eval_fn(prediction, answer)` supplies a score in `[0,1]`. Each distinct sampled graph is evaluated once on the batch and its outputs and score are reused within that update. Both node and edge offsets receive the centered covariance gradient:
+Inactive pairs are fixed to zero; every absent active-pair edge contributes its Bernoulli factor. Empty and singleton masks have a point-mass edge law.
+
+## Conditional edge sampling
+
+`await strategy.sample_reference(initial=None, transitions=None, nodes=None)` draws one mask or uses the supplied mask. Starting from an empty DAG (or the supplied feasible graph), each step toggles one uniformly chosen active directed edge. Cyclic proposals are rejected. The acceptance probability is `min(1, h(A_prime|z)/h(A|z))`.
+
+Each transition contributes one retained graph, including rejected steps. The default is `mcmc_samples=10`. Node masks and score parameters remain fixed for the entire chain. `use_mcmc=False` uses independent edge draws with DAG rejection under the same fixed mask.
+
+## Task-feedback objective
+
+Training maximizes
 
 ```text
-Cov_q(u - (log_base_q - log_base_p0)/beta, grad(log_base_q)).
+J = E_P[utility] - nuclear_weight * ||mu||_*
+                - variance_weight * sum(sigma_ij²)
+                - prior_weight * KL(q(u)||p(u)).
 ```
 
-Centering cancels both DAG normalizers. With `use_mcmc=True`, the lazy coordinate kernel samples the current constrained variational distribution. With `False`, independent Bernoulli proposals are accepted only when already feasible; a finite rejection budget reports when coordinate sampling is needed. Both paths fit the same objective. Sampling the utility-tilted reference target is available separately through `sample_reference`.
+`eval_fn(prediction, answer)` supplies the utility in `[0,1]`. Each distinct retained graph is evaluated on the batch; repeated states receive the same batch score. Empty masks receive zero accuracy. With a fixed sampled mask, the utility gradient combines the mean utility times the node log-probability gradient and the centered covariance of utility with the edge log-mass gradient. Centering accounts for the conditional DAG normalizer. The finite-chain estimator averages over every retained transition.
 
-`accuracies` and `utilities` summarize retained variational states. `total_executed` counts evaluated graph/example combinations, including the empty state's defined zero score. GP and energy feedback is applied after the graph gradient step.
+The complete update differentiates all three penalties through the GP moments. A single Adam step updates its mean and covariance parameters together. Defaults are `learning_rate=0.001`, `num_iterations=20`, and regularizer weights `0.01`, `0.01`, `0.005`. The statistics report the score surrogate loss, task accuracy and regularized objective.
 
-## Deployment
+## Deployment and execution
 
-`await strategy.run(inputs, num_rounds=...)` draws nodes and candidate edges independently, removes edges with inactive endpoints, then repairs cycles. A deterministic DFS selects the first cycle, and its lowest-score edge is removed; ties use `(sender_index, receiver_index)`.
+Deployment draws an active set once and holds it across the edge draws. Candidate pairs come from the spatial mask, optionally restricted by `mu_ij > candidate_threshold`. Each candidate receives an independent `Normal(mu_ij,sigma_ij²)` draw and becomes an edge if its score exceeds `edge_threshold`.
 
-With multiple samples, active nodes are their union and edges are retained exactly when their frequency is **strictly greater** than `consensus_threshold`. The consensus graph receives the same cycle repair, using edge frequencies as scores. `use_mean=True` selects `deployment_samples` draws; `False` selects one draw.
+A deterministic DFS locates a cycle and deletes its smallest-mean edge, breaking ties by pair index. With multiple draws, an edge survives if its frequency is strictly greater than `consensus_threshold`. A final repair deletes the smallest-frequency edge in each detected cycle. Active isolated agents are preserved.
 
-The configured spatial mask defines the deployment candidate set. Reference calibration has full feasible support; deployment applies that candidate set. This gives the reference target and the repaired deployment distribution explicit, separate definitions.
+`AgentGraph.arun_state` executes the selected DAG with request-local connection, output and memory buffers. Temporal communication follows the configured temporal mask on active endpoints. Agent failures propagate after retries.
 
-`AgentGraph.arun_state` executes the selected state directly. It does not resample edges or execute inactive agents. Each call uses separate connection, output and memory buffers, while sharing the LLM clients and execution functions. Across multiple rounds, temporal links follow the fixed configured temporal mask restricted to active endpoints. The Bayesian objective charges spatial edge density; temporal masks are part of the fixed execution protocol. Agent failures propagate after retries.
+## Persistence
 
-## Entry points and saved state
+Version-3 checkpoints save embedding rows, agent order, variational parameters, fixed inducing inputs, energies, completeness, Adam state and the private random-generator state. Restoring a checkpoint reproduces the next graph draw. Version-2 graph-offset checkpoints use a different parameterization; initialize and train the variational GP when upgrading.
 
-- `AgentBayesian(config).set_graph(graph)` enables direct control of completeness, energies, calibration and reference sampling.
-- `TokenOptimizer` dispatches `strategy="bayesian"` training, inference and persistence to `AgentBayesian`.
-- `save` / `load` preserve joint logits, GP moments, energies, completeness, optimizer state and random-generator state. Restore into a graph with the same agent order and execution protocol.
-- Version-2 checkpoints encode the joint state; older edge-only checkpoints need recalibration with this model.
-- Core PyTorch supplies the GP and discrete sampler. `pip install -e '.[bayesian]'` remains accepted as an installation alias.
-
-Run the complete offline example:
+Run the offline workflow and regression checks:
 
 ```bash
 python -m beam.examples.bayesian_workflow
 python -m pytest -q
 ```
-
-Tests enumerate all 38 feasible three-agent states and check detailed balance, stationarity, the multi-step minorization, and the centered gradient against the exact finite-state objective. Additional tests cover GP conditional covariance, energy bounds, strict consensus thresholds, request isolation and checkpoint continuation.

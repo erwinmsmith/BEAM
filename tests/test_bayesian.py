@@ -24,7 +24,6 @@ def make_strategy(**options):
             strategy="bayesian",
             use_mcmc=True,
             mcmc_samples=120,
-            mcmc_warmup=30,
             random_seed=14,
             **options,
         ),
@@ -38,24 +37,50 @@ def make_strategy(**options):
     return strategy
 
 
-def test_energy_bounds_and_completeness_variance_once():
-    strategy = make_strategy(energy_gain=100, energy_cost=100)
+def test_energy_equation_coupling_and_separate_observation_uncertainty():
+    strategy = make_strategy()
     before = strategy.edge_vars.clone()
     strategy.set_completeness([0.5, 0.25])
-    expected = strategy.config.optimization.uncertainty_scale**2 * (0.5**2 + 0.75**2)
-    assert float(strategy.edge_vars[0, 1] - before[0, 1]) == pytest.approx(expected)
-    strategy.set_completeness([1, 1])
-    strategy.update_energy([1, 0], [0, 1])
-    assert strategy.energy.tolist() == [2.0, 0.1]
-    r, p = strategy.probabilities(fitted=False)
-    assert ((r > 0) & (r < 1)).all() and p[0, 0] == 0 and p[1, 1] == 0
-    assert ((p[[0, 1], [1, 0]] > 0) & (p[[0, 1], [1, 0]] < 1)).all()
+    assert torch.equal(strategy.edge_vars, before)
+    e = strategy.energy.clone()
+    coupling = strategy.coupling()
+    assert float(coupling[0, 1]) == pytest.approx(1 / (2 + 1e-6) ** 0.5)
+    rng = torch.Generator().set_state(strategy.generator.get_state())
+    noise = torch.randn(2, dtype=torch.float64, generator=rng)
+    c = strategy.config.optimization
+    expected = (
+        e
+        + (c.energy_gain * torch.tensor([1.0, 0.0]) - c.energy_cost * coupling.sum(1)) * c.energy_dt
+    )
+    expected += (
+        c.uncertainty_scale * (1 - strategy.completeness) * torch.sqrt(e * c.energy_dt) * noise
+    )
+    strategy.update_energy([1, 0])
+    assert torch.allclose(strategy.energy, expected)
+    before = strategy.energy.clone()
+    with pytest.raises(ValueError, match="positive domain"):
+        strategy.update_energy([0, 0], [100, 100])
+    assert torch.equal(strategy.energy, before)
 
 
-def test_calibration_updates_joint_logits_gp_and_energy():
+def test_node_probabilities_use_score_means_and_incident_variances():
     strategy = make_strategy()
-    original = strategy.offsets.detach().clone()
-    original_mean = strategy.gp.mean.clone()
+    means, vars = strategy._score_moments()
+    r, p = strategy.probabilities()
+    from beam.core.probability import interior_cdf
+
+    expected = interior_cdf(
+        means.sum(0) + means.sum(1) + 0.1 * strategy.energy, vars.sum(0) + vars.sum(1), 1.0
+    )
+    assert torch.allclose(r, expected)
+    assert p[0, 0] == 0 and float(p[0, 1]) == pytest.approx(0.5)
+    assert means[0, 1] == 0.5 and float(vars[0, 1].detach()) == pytest.approx(1.0)
+
+
+def test_calibration_updates_gp_mean_covariance_and_energy():
+    strategy = make_strategy(node_threshold=-2.0)
+    original_mean = strategy.gp.mean.detach().clone()
+    original_cov = strategy.gp.covariance.detach().clone()
     prior_energy = strategy.energy.clone()
     stats = strategy.train(
         [{"task": "q", "answer": "yes"}],
@@ -64,12 +89,22 @@ def test_calibration_updates_joint_logits_gp_and_energy():
         verbose=False,
     )
     assert stats["total_executed"] > 0
-    assert not torch.equal(strategy.offsets, original)
     assert not torch.equal(strategy.gp.mean, original_mean)
+    assert not torch.equal(strategy.gp.covariance, original_cov)
     assert not torch.equal(strategy.energy, prior_energy)
-    assert torch.isfinite(strategy.offsets).all()
-    assert strategy.offsets[:2].abs().sum() > 0
-    assert strategy.offsets[2:].abs().sum() > 0
+    assert all(torch.isfinite(p).all() for p in strategy.gp.parameters())
+    assert len({tuple(x["nodes"]) for x in strategy.observation_history}) == 1
+
+
+def test_pair_features_include_supplied_embeddings_and_energies():
+    strategy = make_strategy()
+    embedding = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=torch.float64)
+    strategy.set_graph(strategy.graph, embedding)
+    assert torch.equal(
+        strategy._pair_features()[0], torch.cat([embedding[0], embedding[1], torch.ones(2)])
+    )
+    strategy.update_energy([1, 0], [0, 0])
+    assert float(strategy._pair_features()[0, -2]) == pytest.approx(1.1)
 
 
 def test_execution_preserves_graph_and_inactive_nodes_exactly():
@@ -152,6 +187,11 @@ def test_checkpoint_restores_next_draw_and_fitted_distribution(tmp_path):
     assert torch.equal(strategy.energy, other.energy)
     assert torch.equal(strategy.gp.covariance, other.gp.covariance)
     assert asyncio.run(strategy.run({"task": "q"})) == asyncio.run(other.run({"task": "q"}))
+    data = [{"task": "q", "answer": "yes"}]
+    for model in (strategy, other):
+        model.train(data, lambda p, a: float(p == a), num_iterations=1, verbose=False)
+    for a, b in zip(strategy.gp.parameters(), other.gp.parameters()):
+        assert torch.equal(a, b)
 
 
 def test_token_optimizer_dispatches_bayesian_and_round_override(tmp_path):
@@ -171,15 +211,10 @@ def test_token_optimizer_dispatches_bayesian_and_round_override(tmp_path):
     assert "node_probabilities" in optimizer.get_edge_statistics()
 
 
-def test_reference_is_frozen_during_external_updates():
+def test_reference_holds_one_mask_for_every_transition():
     strategy = make_strategy()
-
-    async def utility(x):
-        strategy.set_completeness([0.1, 0.2])
-        return sum(x.nodes) / 2
-
-    states = asyncio.run(strategy.sample_reference(utility, transitions=30, burn_in=5))
-    assert len(states) == 25 and all(x.feasible() for x in states)
+    states = asyncio.run(strategy.sample_reference(transitions=30, nodes=(1, 1)))
+    assert len(states) == 30 and all(x.feasible() and x.nodes == (True, True) for x in states)
 
 
 def test_independent_calibration_path():
@@ -192,14 +227,14 @@ def test_independent_calibration_path():
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("beta", 0),
-        ("baseline_std", 0),
-        ("energy_min", -1),
+        ("energy_dt", 0),
+        ("prior_weight", -1),
+        ("energy_initial", -1),
         ("energy_initial", float("nan")),
         ("consensus_threshold", 1.2),
         ("gp_scale", 0),
         ("deployment_samples", 0),
-        ("mcmc_samples", 1),
+        ("mcmc_samples", 0),
     ],
 )
 def test_configuration_rejects_invalid_theory_domains(field, value):
@@ -223,9 +258,9 @@ def test_checkpoint_accepts_enum_strategy_and_rejects_old_schema(tmp_path):
     strategy.save(path)
     other = make_strategy()
     other.load(path)
-    assert torch.equal(strategy.offsets, other.offsets)
+    assert torch.equal(strategy.gp.mean, other.gp.mean)
     torch.save({"edge_means": torch.zeros(4)}, path)
-    with pytest.raises(ValueError, match="version-2"):
+    with pytest.raises(ValueError, match="version-3"):
         other.load(path)
 
 
@@ -255,3 +290,23 @@ def test_prune_entry_point_still_executes():
     graph.init_potential_edges()
     answers, _ = asyncio.run(TokenOptimizer(config, graph).run({"task": "q"}))
     assert answers == ["two"]
+
+
+def test_training_defaults_and_all_three_regularizers():
+    config = OptimizationConfig()
+    assert (config.mcmc_samples, config.learning_rate, config.num_iterations) == (10, 0.001, 20)
+    assert (config.nuclear_weight, config.variance_weight, config.prior_weight) == (
+        0.01,
+        0.01,
+        0.005,
+    )
+    strategy = make_strategy()
+    with torch.no_grad():
+        strategy.gp.location.fill_(0.2)
+    means, variance = strategy._score_moments()
+    expected = (
+        0.01 * torch.linalg.matrix_norm(means, ord="nuc")
+        + 0.01 * variance.sum()
+        + 0.005 * strategy.gp.kl_divergence()
+    )
+    assert torch.allclose(strategy._regularization(means, variance), expected)

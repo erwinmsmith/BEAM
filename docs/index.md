@@ -11,8 +11,8 @@ BEAM jointly selects agent participation and communication links. It combines ta
 ## What BEAM provides
 
 - **Joint node–edge selection:** choose participating agents and their communication routes together.
-- **Uncertainty-aware scoring:** bounded energy and sparse Gaussian-process moments inform selection probabilities.
-- **Utility-based calibration:** optimize a KL-regularized objective with a covariance-gradient estimator.
+- **Uncertainty-aware scoring:** energy and sparse variational Gaussian-process moments inform selection probabilities.
+- **Utility-based calibration:** optimize task utility with nuclear-norm, variance and inducing-variable KL penalties.
 - **Feasible execution:** deterministic cycle repair and edge-frequency consensus produce an executable DAG.
 - **Framework integration:** use native asynchronous execution or connect graph masks to LangChain and LangGraph workflows.
 
@@ -41,6 +41,6 @@ python -m beam.examples.bayesian_workflow
 
 ## Algorithm checks
 
-The test suite enumerates all 38 feasible three-agent states and checks detailed balance, stationary mass, the covariance gradient, Gaussian-process conditional variance, and exact DAG execution.
+The test suite covers fixed-mask DAG kernels, joint node/edge gradients, Gaussian-process covariance and KL, and exact DAG execution.
 
 These docs use [MkDocs Material](https://squidfunk.github.io/mkdocs-material/). Edit Markdown files in `docs/`; changes pushed to `main` are built and published by GitHub Actions.

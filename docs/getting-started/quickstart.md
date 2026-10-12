@@ -6,7 +6,7 @@ Run the complete offline workflow:
 python -m beam.examples.bayesian_workflow
 ```
 
-It builds three agents, sets their completeness coefficients, calibrates the joint graph distribution, draws 200 retained reference states and executes a deployment DAG.
+It builds three agents, sets their completeness coefficients, calibrates the joint graph distribution, draws 10 retained conditional graph states and executes a deployment DAG.
 
 ## Complete example
 

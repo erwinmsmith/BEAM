@@ -2,20 +2,20 @@
 
 ## `AgentBayesian`
 
-Construct with `AgentBayesian(config)`, register all agents on an `AgentGraph`, and attach it using `set_graph(graph)`.
+Construct with `AgentBayesian(config)`, register all agents on an `AgentGraph`, and attach it using `set_graph(graph, embeddings=None)`.
 
 | Method | Behavior |
 | --- | --- |
 | `set_completeness(completeness)` | One retained-information coefficient in `[0,1]` per agent |
-| `update_energy(contributions, costs)` | Clipped energy update from two bounded per-agent vectors |
-| `probabilities(fitted=True)` | Returns node vector and off-diagonal edge matrix |
+| `update_energy(contributions, costs=None)` | Square-root energy transition with outgoing-strength costs |
+| `probabilities()` | Returns node vector and off-diagonal edge matrix |
 | `train(data, eval_fn, ...)` | Synchronous calibration |
 | `await atrain(data, eval_fn, ...)` | Asynchronous calibration |
-| `await sample_reference(utility, initial=None, transitions=None, burn_in=None)` | Retained fixed-target graph states |
+| `await sample_reference(initial=None, transitions=None, nodes=None)` | All retained transitions under one fixed mask |
 | `await run(inputs, num_rounds=None, use_mean=True)` | Answers and deployment metadata |
 | `run_sync(inputs, num_rounds=None)` | Synchronous deployment |
 | `get_edge_statistics()` | Pair moments, probabilities, energies and completeness |
-| `save(path)` / `load(path)` | Version-2 model and sampler state |
+| `save(path)` / `load(path)` | Version-3 variational GP and sampler state |
 
 `use_mean=True` aggregates `deployment_samples` independent draws. `False` uses one draw. Metadata contains `node_mask`, `adjacency`, `active_nodes`, `active_edges`, `calibration_mcmc` and `deployment_samples`.
 

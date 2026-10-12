@@ -21,3 +21,5 @@ print(metadata["adjacency"])
 ```
 
 The boolean mask records participation, including isolated active nodes. Each true adjacency entry records a selected directed communication link. [The complete source](../getting-started/quickstart.md) is included from the same file exercised by CI.
+
+The example sets `node_threshold=0.0` to favor participation in its three-agent demonstration. General configurations default to `n-1`.

@@ -11,7 +11,7 @@ python -m mkdocs build --strict
 python scripts/check_site.py
 ```
 
-The finite-state tests construct the complete three-agent transition kernel. Numerical tests compare the covariance gradient with finite differences of the exact constrained objective. Execution tests cover inactive agents, fixed selected edges, concurrent requests, checkpoints and integration masks.
+The finite-state tests construct the complete three-agent transition kernel. Numerical tests compare the node and centered edge-score gradient with the exact joint objective over all masks and DAGs. Execution tests cover inactive agents, fixed selected edges, concurrent requests, checkpoints and integration masks.
 
 ## Continuous integration
 
@@ -34,8 +34,8 @@ Open the local URL printed by MkDocs; the preview refreshes when Markdown change
 
 ## Reproducible execution
 
-Set `random_seed` for the graph sampler. Version-2 checkpoints contain fitted offsets, GP moments, energies, completeness, Adam state and the private random-generator state. Restore into a graph with the same node order and execution protocol.
+Set `random_seed` for the graph sampler. Version-3 checkpoints contain agent embeddings and order, GP variational parameters and inducing inputs, energies, completeness, Adam state and the private random-generator state. Restore into a graph with the same node order and execution protocol.
 
-Keep each reference chain's utility and parameters fixed. Apply energy and GP updates between calibration batches. LLM evaluations belong to your chosen task protocol; the included regression suite uses deterministic callbacks.
+Keep each edge chain's node mask and parameters fixed. Apply energy and GP updates between calibration batches. LLM evaluations belong to your chosen task protocol; the included regression suite uses deterministic callbacks.
 
 [Algorithm mapping](models/implementation.md) · [Latest CI runs](https://github.com/erwinmsmith/BEAM/actions)

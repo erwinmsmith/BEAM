@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beam-mas"
-version = "0.2.0"
+version = "0.3.0"
 description = "BEAM: A Bayesian Energy-Aware Framework for Multi-Agent Communication Optimization under Incomplete Information"
 readme = "README.md"
 license = {text = "MIT"}

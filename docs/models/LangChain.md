@@ -25,4 +25,4 @@ node = AgentNode(
 
 Register each node with `graph.add_node(node)` and attach the complete graph to `AgentBayesian`. Supply credentials through your model provider's environment variables.
 
-`LangChainCallbackHandler` records prompt, completion and total token counts from LLM callbacks. Use those measurements in an evaluation protocol or cost analysis. The Bayesian calibration utility uses its configured normalized spatial-edge cost.
+`LangChainCallbackHandler` records prompt, completion and total token counts from LLM callbacks. Use those measurements in an evaluation protocol or cost analysis. The Bayesian calibration uses the supplied task score; communication strengths drive the energy cost feedback.

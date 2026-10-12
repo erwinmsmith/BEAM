@@ -60,41 +60,35 @@ class OptimizationConfig:
     # Dropout parameters
     dropout_rate: float = 0.2
     
-    # Bayesian parameters
+    # Bayesian sampling and deployment
     use_bayesian: bool = False
     use_mcmc: bool = True
-    mcmc_samples: int = 50
-    mcmc_warmup: int = 5
-
-    # Fixed-target calibration and score-based deployment
-    beta: float = 1.0
-    communication_cost_weight: float = 0.1
+    mcmc_samples: int = 10
     deployment_samples: int = 10
     consensus_threshold: float = 0.5
-    energy_min: float = 0.1
-    energy_max: float = 2.0
+    candidate_threshold: Optional[float] = None
     energy_initial: float = 1.0
     energy_gain: float = 0.1
     energy_cost: float = 0.1
     energy_dt: float = 1.0
     uncertainty_scale: float = 0.1
-    baseline_std: float = 0.1
     coupling_epsilon: float = 1e-6
     edge_threshold: float = 0.5
     node_energy_weight: float = 0.1
     node_threshold: Optional[float] = None  # n - 1 when omitted
-    node_std: float = 1.0
     gp_inducing_points: int = 10
     gp_length_scale: float = 1.0
     gp_scale: float = 1.0
-    gp_observation_variance: float = 0.1
     gp_jitter: float = 1e-6
+    nuclear_weight: float = 0.01
+    variance_weight: float = 0.01
+    prior_weight: float = 0.005
     random_seed: Optional[int] = None
-    
+
     # Training parameters
-    learning_rate: float = 0.1
+    learning_rate: float = 0.001
     batch_size: int = 40
-    num_iterations: int = 2
+    num_iterations: int = 20
 
 
 @dataclass

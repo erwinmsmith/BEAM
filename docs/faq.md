@@ -14,7 +14,7 @@ It is the retained fraction of the observation available to an agent. Supply one
 
 ## How are reference sampling and deployment related?
 
-The reference chain targets the utility-tilted feasible graph distribution. Deployment draws candidate graphs and applies deterministic repair and frequency consensus. See the [probability model](models/beam-theory.md) for their respective laws.
+The reference chain samples the DAG-conditioned Bernoulli edge law under one fixed node mask. Deployment draws candidate graphs and applies deterministic repair and frequency consensus. See the [probability model](models/beam-theory.md) for their respective laws.
 
 ## Can a sampled graph have no active agents?
 
@@ -26,4 +26,4 @@ Use `await strategy.atrain(...)` and `await strategy.run(...)`. The `train` and 
 
 ## How do I restore a model?
 
-Construct the same agent graph, call `set_graph`, then `load(path)`. Version-2 checkpoints store the joint model and sampler state. For an older edge-only checkpoint, calibrate the joint model and save a version-2 checkpoint.
+Construct the same agent graph, call `set_graph`, then `load(path)`. Version-3 checkpoints store the variational GP and sampler state. Initialize and train a version-3 model when upgrading from graph-offset checkpoints.

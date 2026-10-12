@@ -14,15 +14,15 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
 </p>
 
-[Documentation](https://erwinmsmith.github.io/BEAM/) · [Quick start](https://erwinmsmith.github.io/BEAM/getting-started/quickstart/) · [Tests](https://github.com/erwinmsmith/BEAM/actions/workflows/tests.yml)
+[Documentation](docs/index.md) · [Quick start](docs/getting-started/quickstart.md) · [Tests](tests/)
 
-BEAM jointly models agent participation and communication links. Bounded energy combines contribution and cost, pairwise Gaussian-process moments represent uncertainty, and a KL-regularized objective calibrates the graph distribution. Deployment constructs a feasible DAG and executes its selected agents and links.
+BEAM jointly models agent participation and communication links. Energy combines contribution and communication cost, pairwise Gaussian-process moments represent uncertainty, and task feedback with nuclear-norm, variance and GP prior regularization trains the graph distribution. Deployment constructs a feasible DAG and executes its selected agents and links.
 
 ## Run locally
 
+Download and extract the repository, then open a terminal in its root directory.
+
 ```bash
-git clone https://github.com/erwinmsmith/BEAM.git
-cd BEAM
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
@@ -35,11 +35,11 @@ The example runs calibration, fixed-target reference sampling and deployment on 
 
 | Stage | Implementation | Purpose |
 | --- | --- | --- |
-| Observation and energy | `set_completeness`, `update_energy` | Retained-information coefficients and clipped positive energy |
+| Observation and energy | `set_completeness`, `update_energy` | Retained-information coefficients and square-root energy updates |
 | Score uncertainty | `SparsePairGP`, `probabilities` | Inducing-variable moments and Gaussian exceedance probabilities |
-| Calibration | `train` / `atrain` | Centered gradient of expected utility minus KL regularization |
-| Reference chain | `sample_reference` | Fixed-target, lazy coordinate Metropolis–Hastings |
-| Deployment | `run` / `run_sync` | Independent graph draws, cycle repair and strict frequency consensus |
+| Calibration | `train` / `atrain` | Node and centered edge scores with three regularizers |
+| Reference chain | `sample_reference` | Fixed-mask single-edge Metropolis–Hastings |
+| Deployment | `run` / `run_sync` | Gaussian edge draws, cycle repair and strict frequency consensus |
 | Execution | `AgentGraph.arun_state` | Exact active-node and edge execution with isolated request buffers |
 
 ```python
@@ -59,7 +59,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Use `AgentNode` callbacks or an LLM client to define agents. Register nodes with `graph.add_node(node)` in the intended state-coordinate order, then call `strategy.set_graph(graph)`. See the [API reference](https://erwinmsmith.github.io/BEAM/api-reference/apireference/) for complete construction and persistence interfaces.
+Use `AgentNode` callbacks or an LLM client to define agents. Register nodes with `graph.add_node(node)` in the intended state-coordinate order, then call `strategy.set_graph(graph)`. See the [API reference](docs/api-reference/apireference.md) for complete construction and persistence interfaces.
 
 ## Engineering checks
 
@@ -71,7 +71,7 @@ python -m mkdocs build --strict
 python scripts/check_site.py
 ```
 
-Tests enumerate all 38 feasible three-agent states and verify detailed balance, stationarity, multi-step minorization, the covariance gradient, GP conditional variance, energy bounds, DAG execution, integration masks and checkpoint continuation. CI runs Python 3.9 and 3.12. The static documentation site deploys through GitHub Pages artifacts from `main`.
+Tests cover all 25 DAGs on three active nodes and all node masks. They verify detailed balance, stationarity, the joint score gradient, GP covariance and KL, energy transitions, DAG execution, integration masks and checkpoint continuation. CI runs Python 3.9 and 3.12. The static documentation site deploys through GitHub Pages artifacts from `main`.
 
 ## Integrations and strategy interfaces
 
